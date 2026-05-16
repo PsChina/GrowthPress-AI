@@ -1,0 +1,116 @@
+"""m5 dispatcher — 把已解析的 InboundMsg 路由到对应 handler.
+
+6 通道 (memory project_growthpress_human_loop.md L16-L23):
+  APV / PUB / REJECT / email_topic / email_content / ROUTE-*
+
+REJECT 是出邮件方向 — 如果用户回了 REJECT (不该回), 当 UNKNOWN 走启发式
+(大概率会被判成"完整文章"或"喂选题"). 这里实际处理: log warning + 仍走启发式,
+不静默丢 (用户写了东西, 总要响应).
+
+m3 import 容错: from growthpress.approver import handle_approval_reply 若失败
+(并行 agent 未完成时), 用 importlib 延迟 import + log warning.
+"""
+from __future__ import annotations
+
+import importlib
+import logging
+from typing import Any, Awaitable, Callable
+
+from ..db import Database
+from .handlers import (
+    handle_email_content,
+    handle_email_topic,
+    handle_retract_reply,
+    handle_route_command,
+)
+from .heuristic import looks_like_complete_article
+from .schemas import InboundMsg
+from .subject_parser import SubjectKind, parse_subject
+
+log = logging.getLogger("growthpress.mailbox.dispatcher")
+
+# m3 handler import 字符串. 并行 agent 完成后这里可直接 from growthpress.approver
+# import handle_approval_reply, 当前用 importlib 延迟以容错.
+_M3_HANDLER = "growthpress.approver:handle_approval_reply"
+
+
+async def _call_approval_reply(msg: InboundMsg, db: Database) -> None:
+    """延迟 import m3 handler. 若 m3 尚未实现 (并行 agent 未完成), log + 跳过.
+
+    m3.handle_approval_reply 入参约定: dict {subject, body_text, message_id, from_addr}
+    (m3 实现文件 approver/handler.py L160-L181). 这里负责把 InboundMsg 适配成 dict —
+    我们的 InboundMsg.sender 是 RFC822 ("Name <addr>"), m3 期望的 from_addr 是纯
+    邮箱串, 用 email.utils.parseaddr 抽出.
+    """
+    from email.utils import parseaddr
+    _, from_addr = parseaddr(msg.sender or "")
+
+    payload = {
+        "subject": msg.subject,
+        "body_text": msg.body_text,
+        "message_id": msg.message_id,
+        "from_addr": from_addr or msg.sender,
+    }
+
+    mod_path, attr = _M3_HANDLER.split(":", 1)
+    try:
+        mod = importlib.import_module(mod_path)
+    except ImportError as e:
+        log.warning(
+            f"[m5/dispatch] m3 module {mod_path!r} 不可 import (并行 agent 未完成?): "
+            f"{e!r}. APV 回信暂存 log, 不丢: subject={msg.subject!r}"
+        )
+        return
+    fn = getattr(mod, attr, None)
+    if fn is None:
+        log.warning(
+            f"[m5/dispatch] m3 {mod_path}:{attr} 不存在. "
+            f"APV 回信暂存 log: subject={msg.subject!r}"
+        )
+        return
+    await fn(payload, db)
+
+
+async def dispatch_inbound(msg: InboundMsg, db: Database) -> None:
+    """单封邮件按 subject + 正文启发式分发到 6 通道之一. 异常向上抛 (poller 兜)."""
+    info = parse_subject(msg.subject)
+    log.info(
+        f"[m5/dispatch] uid={msg.uid} kind={info.kind.value} "
+        f"token={info.token!r} sender={msg.sender!r} "
+        f"subject={msg.subject[:80]!r}"
+    )
+
+    if info.kind == SubjectKind.APPROVAL_REPLY:
+        await _call_approval_reply(msg, db)
+        return
+
+    if info.kind == SubjectKind.RETRACT_REPLY:
+        await handle_retract_reply(msg, db)
+        return
+
+    if info.kind == SubjectKind.REJECT_NOTICE:
+        # REJECT 不该有回信. 用户回了 REJECT → 当作"重新提交"走启发式.
+        log.info(
+            f"[m5/dispatch] REJECT 邮件被回信 (用户应发新邮件而非回复), "
+            f"降级走启发式 dispatch: subject={msg.subject!r}"
+        )
+        # fall through to 启发式分支 (无 token 路径)
+
+    elif info.kind in (
+        SubjectKind.ROUTE_ADD,
+        SubjectKind.ROUTE_REMOVE,
+        SubjectKind.ROUTE_LIST,
+        SubjectKind.ROUTE_DEFAULT,
+        SubjectKind.ROUTE_CRON,
+    ):
+        await handle_route_command(msg, db)
+        return
+
+    # UNKNOWN (或降级的 REJECT) — 走启发式
+    if looks_like_complete_article(msg.body_text):
+        await handle_email_content(msg, db)
+    else:
+        await handle_email_topic(msg, db)
+
+
+__all__ = ["dispatch_inbound"]

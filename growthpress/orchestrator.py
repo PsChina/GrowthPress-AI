@@ -21,8 +21,11 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 
 from . import __version__, scout_writer
+from .approver import send_approval
 from .db import Database
+from .mailbox import imap_poller_run
 from .scout_writer.topics import load_topics_config, pick_next_topic
+from .watchdog import watchdog_task
 
 log = logging.getLogger("growthpress")
 
@@ -70,11 +73,34 @@ async def schedule_runs(db: Database) -> None:
         await asyncio.sleep(cfg.schedule.interval_minutes * 60)
 
 
-async def imap_poller_run(db: Database) -> None:
-    """W3 接: aioimaplib 每 30s 扫 INBOX, APV-*/PUB-* 分发."""
+async def m3_pump_runs(db: Database) -> None:
+    """周期扫 drafts.state='approved' 调 m3 send_approval (发 APV 邮件).
+
+    简单轮询模式 (60s), 失败 try/except 包住不挂 task. m3 send_approval 内部:
+    - 用 db.transition CAS 锁 state approved → pending_human (失败说明 state 已变, 跳过)
+    - INSERT approvals state='pending' expires_at=now+24h
+    - SMTP 发邮件; 失败回滚 (DELETE approvals + state 回 approved 等下轮重试)
+    """
+    log.info("[m3_pump] start, interval=60s")
     while True:
-        log.debug("[imap] tick (W3 stub, 无动作)")
-        await asyncio.sleep(30)
+        try:
+            rows = await db.read(
+                "SELECT id FROM drafts WHERE state='approved' ORDER BY updated_at LIMIT 10"
+            )
+            for r in rows:
+                draft_id = r["id"]
+                try:
+                    pub_id = await send_approval(draft_id, db)
+                    if pub_id:
+                        log.info(f"[m3_pump] APV sent: draft={draft_id} pub={pub_id}")
+                except Exception as e:
+                    log.error(
+                        f"[m3_pump] send_approval failed for {draft_id}: {e!r}",
+                        exc_info=True,
+                    )
+        except Exception as e:
+            log.error(f"[m3_pump] scan failed: {e!r}", exc_info=True)
+        await asyncio.sleep(60)
 
 
 async def pending_watch(db: Database) -> None:
@@ -110,8 +136,10 @@ async def main_async() -> None:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(db.writer_loop(), name="db_writer")
                 tg.create_task(schedule_runs(db), name="scheduler")
+                tg.create_task(m3_pump_runs(db), name="m3_pump")
                 tg.create_task(imap_poller_run(db), name="imap_poller")
                 tg.create_task(pending_watch(db), name="pending_watch")
+                tg.create_task(watchdog_task(db), name="watchdog")
                 tg.create_task(_wait_stop(stop, tg), name="stop_watcher")
         except* asyncio.CancelledError:
             pass  # TaskGroup 收到 stop 信号正常退出
