@@ -37,7 +37,9 @@ WEB_SEARCH_TOOL: dict[str, Any] = {
     "max_uses": 3,   # 实测 5 次易触发 DeepSeek 端连接超时, 3 次够覆盖 (近 7 天调研)
 }
 
-# 匹配末尾 ```json ... ``` block. 用最后一个 (model 偶尔会在中间放示例 block).
+# 匹配 ```markdown ... ``` 块 (m1 body_md 输出). 取最后一个 (model 偶尔在 thinking 里举例).
+_MD_BLOCK_RE = re.compile(r"```markdown\s*\n(.*?)\n```", re.DOTALL)
+# 匹配 ```json ... ``` 元数据 block. 取最后一个.
 _JSON_BLOCK_RE = re.compile(r"```json\s*\n(\{.*?\})\s*\n```", re.DOTALL)
 
 
@@ -51,35 +53,50 @@ def _extract_full_text(response: Any) -> str:
 
 
 def _parse_draft(full_text: str) -> DraftSchema:
-    """从 model 输出里抽出末尾 JSON block + pydantic 校验.
+    """两个 fenced block 拼装: ```markdown``` 装 body_md, ```json``` 装其他元数据.
 
-    DeepSeek 偶尔在 body_md (长 markdown) 里没正确 escape 双引号 / 反斜杠,
-    严格 JSON 会挂. 用 json5 兜底 — 它允许更宽松语法 (multiline string /
-    unescaped quotes), 实战 LLM 输出更稳.
+    这样 body_md (含中文双引号 / 反斜杠 / 换行) 不进 JSON 字面量, 不需要 escape,
+    避免 LLM 漏 escape 导致 JSON 整体解析挂.
     """
-    matches = _JSON_BLOCK_RE.findall(full_text)
-    if not matches:
+    md_matches = _MD_BLOCK_RE.findall(full_text)
+    if not md_matches:
+        raise ValueError(
+            f"未找到 ```markdown``` 正文 block. 输出末尾:\n{full_text[-500:]}"
+        )
+    body_md = md_matches[-1].strip()
+
+    json_matches = _JSON_BLOCK_RE.findall(full_text)
+    if not json_matches:
         raise ValueError(
             f"未找到 ```json``` 元数据 block. 输出末尾:\n{full_text[-500:]}"
         )
-    raw = matches[-1]  # 取最后一个 block (model 偶尔在中间放示例)
+    raw_json = json_matches[-1]
 
-    # 先严格 JSON 试 (快)
+    # 先 strict 试 (json 不含 body_md, 应该干净)
     try:
-        return DraftSchema.model_validate_json(raw)
-    except ValidationError as strict_err:
-        # fallback: json5 容错解析
+        data = json.loads(raw_json)
+    except json.JSONDecodeError as strict_err:
+        # fallback: json5 (容 trailing comma / 单引号 / 注释)
         try:
             import json5
-            data = json5.loads(raw)
-            return DraftSchema.model_validate(data)
+            data = json5.loads(raw_json)
         except Exception as lenient_err:
             raise ValueError(
-                f"JSON 解析失败 (strict + json5 都救不了):\n"
+                f"元数据 JSON 解析失败 (strict + json5 都救不了):\n"
                 f"  strict: {strict_err}\n"
                 f"  json5 : {lenient_err}\n"
-                f"原始:\n{raw[:500]}"
+                f"原始:\n{raw_json[:500]}"
             )
+
+    # 合入 markdown block (允许 LLM 误把 body_md 塞进 json — 我们用 md block 覆盖)
+    data["body_md"] = body_md
+
+    try:
+        return DraftSchema.model_validate(data)
+    except ValidationError as e:
+        raise ValueError(
+            f"draft schema 校验失败: {e}\n元数据: {data!r}"
+        )
 
 
 def _render_markdown(draft: DraftSchema) -> str:
