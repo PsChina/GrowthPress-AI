@@ -72,14 +72,8 @@ async def _send_unknown_reply(
     msg["Subject"] = build_unknown_subject(pub_id, original_subject)
     msg.set_content(build_unknown_body(pub_id=pub_id, raw=raw), charset="utf-8")
     try:
-        await aiosmtplib.send(
-            msg,
-            hostname=s.smtp_host,
-            port=s.smtp_port,
-            username=s.smtp_user,
-            password=s.smtp_pass.get_secret_value(),
-            start_tls=True,
-        )
+        from ..shared.smtp import smtp_send
+        await smtp_send(msg)
         log.info(f"[m3] sent Unknown reply pub_id={pub_id} to={to_addr}")
     except Exception as e:
         log.warning(f"[m3] Unknown 提示邮件发送失败 pub_id={pub_id}: {e!r}")
@@ -219,6 +213,15 @@ async def handle_approval_reply(
     # 4. parse reply
     action = parse_reply(body_text)
     log.info(f"[m3] reply pub_id={pub_id} action={type(action).__name__}")
+    # Unknown 时把 raw body 前 500 字 dump 到 log, 方便定位是哪种客户端 / 哪种引用前缀
+    # 没被 parser 剥掉. body_text 可能含敏感信息 (邮件正文), 但 daemon log 是本地文件,
+    # 不外泄. 调试完可以删. 用 repr 保留转义字符 (\n / \r / \xa0 等).
+    from .schemas import Unknown
+    if isinstance(action, Unknown):
+        log.warning(
+            f"[m3] reply pub_id={pub_id} Unknown 时的 body 前 500 字 (repr): "
+            f"{body_text[:500]!r}"
+        )
 
     # 5. dispatch
     if isinstance(action, Approve):

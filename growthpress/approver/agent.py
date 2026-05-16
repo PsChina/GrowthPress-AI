@@ -55,14 +55,8 @@ async def _send_smtp(*, subject: str, body: str, to_addr: str) -> None:
     msg["Subject"] = subject
     msg.set_content(body, charset="utf-8")
 
-    await aiosmtplib.send(
-        msg,
-        hostname=s.smtp_host,
-        port=s.smtp_port,
-        username=s.smtp_user,
-        password=s.smtp_pass.get_secret_value(),
-        start_tls=True,
-    )
+    from ..shared.smtp import smtp_send
+    await smtp_send(msg)
 
 
 async def _rollback_state(

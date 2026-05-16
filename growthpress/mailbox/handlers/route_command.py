@@ -126,15 +126,8 @@ async def _send_reply(msg: InboundMsg, subject: str, body: str) -> None:
     email.set_content(body)
 
     try:
-        await aiosmtplib.send(
-            email,
-            hostname=s.smtp_host,
-            port=s.smtp_port,
-            username=s.smtp_user,
-            password=s.smtp_pass.get_secret_value(),
-            start_tls=True,
-            timeout=30,
-        )
+        from ...shared.smtp import smtp_send
+        await smtp_send(email, timeout=30)
         log.info(f"[route] 回信 ok: to={email['To']!r} subject={subject!r}")
     except Exception as e:
         log.warning(f"[route] 回信失败 (yaml 已写, 仅反馈丢失): {e!r}")

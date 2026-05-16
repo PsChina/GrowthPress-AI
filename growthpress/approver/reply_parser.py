@@ -26,7 +26,13 @@ def _strip_quotes_and_signature(body: str) -> str:
     """剥邮件 quoted history (> 开头) + 常见签名分隔 (-- ).
 
     只保留 quote 之前的"用户实际写的内容". 邮件客户端引用历史会让回信变长,
-    parse 首词时要先剥掉, 否则首词容易抓到 "On 2026-05-16 ... wrote:".
+    parse 首词时要先剥掉, 否则首词容易抓到 "在 2026-... 写道:" / "On ... wrote:".
+
+    支持的引用前缀 (按客户端常见度排):
+      - Gmail / Outlook (英文): "On Mon, Jan 1, 2020 at ... wrote:"
+      - 163 / QQ / Foxmail (中文): "在 2026-... 写道:" / "在 2026-... pengwei 写道:"
+      - 苹果邮件 / 钉钉邮 (中文): "原始邮件" / "----- 原始邮件 -----"
+      - 通用: "发件人:" / "发送时间:" 等头字段
     """
     lines: list[str] = []
     for line in body.splitlines():
@@ -34,11 +40,22 @@ def _strip_quotes_and_signature(body: str) -> str:
         # 签名分隔: "-- " (RFC 3676) → 后面全是签名
         if stripped == "-- ":
             break
-        # quoted: "> ..." 或 "| ..." 或 "On ... wrote:"
+        # quoted: "> ..." 或 "| ..." 开头
         if _QUOTE_PREFIX_RE.match(stripped):
             break
-        # Gmail "On Wed, May 16, 2026 at ... wrote:" — 启发式匹配
+        # Gmail / Outlook 英文: "On Wed, May 16, 2026 at ... wrote:"
         if re.match(r"^On .{5,80} wrote:\s*$", stripped):
+            break
+        # 163 / QQ / Foxmail 中文: "在 2026-05-16 17:42:35, ... 写道:"
+        if re.match(r"^在\s*\d{4}[-/]\d{1,2}[-/]\d{1,2}.{0,80}写道[:：]?\s*$", stripped):
+            break
+        # 苹果邮件 / 钉钉邮: "----- 原始邮件 -----" / "原始邮件" 单行
+        if re.match(r"^-{2,}\s*(?:原始邮件|Original Message)\s*-{2,}\s*$", stripped):
+            break
+        if stripped in ("原始邮件", "Original Message"):
+            break
+        # 引用块头: 单独一行的 "发件人:" / "From:" 表示引用块开始
+        if re.match(r"^(?:发件人|From|发送时间|Sent|主题|Subject|收件人|To)\s*[:：]", stripped):
             break
         lines.append(line)
     return "\n".join(lines).strip()

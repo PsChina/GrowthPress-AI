@@ -131,12 +131,6 @@ async def _send_digest(db: Database) -> None:
     msg["To"] = s.notify_to
     msg.set_content(body)
 
-    await aiosmtplib.send(
-        msg,
-        hostname=s.smtp_host,
-        port=s.smtp_port,
-        username=s.smtp_user,
-        password=s.smtp_pass.get_secret_value(),
-        start_tls=True,
-    )
+    from ..shared.smtp import smtp_send
+    await smtp_send(msg)
     log.info(f"[daily_digest] sent {subject!r} to {s.notify_to}")

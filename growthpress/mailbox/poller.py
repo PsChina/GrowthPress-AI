@@ -125,6 +125,30 @@ async def _poll_once(db: Database) -> int:
         if resp.result != "OK":
             raise RuntimeError(f"IMAP login failed: {resp.result} {resp.lines}")
 
+        # 网易 (163 / 126 / yeah.net) 强制要求客户端在 LOGIN 后发 IMAP ID 注明身份,
+        # 否则 SELECT 报 "Unsafe Login. Please contact kefu@188.com". RFC 2971.
+        #
+        # aioimaplib.id(**kwargs) 默认序列化是 `( "name" "x" ... )` (括号后有空格),
+        # 163 解析挂报 'BAD: Parse command error'. 必须手动构造 `("name" "x" ...)`
+        # (左括号紧贴第一个字段). 用 raw Command 绕过 arguments_rfs2971.
+        # Gmail / Outlook / QQ 不要求但接受这种格式, 兼容性无害.
+        try:
+            from aioimaplib.aioimaplib import Command
+            notify = s.notify_to or s.imap_user
+            cmd = Command(
+                "ID", client.protocol.new_tag(),
+                '("name"', '"GrowthPress"',
+                '"version"', '"0.2.0"',
+                '"vendor"', '"GrowthPress AI"',
+                '"support-email"', f'"{notify}")',
+                loop=asyncio.get_event_loop(),
+            )
+            id_resp = await client.protocol.execute(cmd)
+            if id_resp.result != "OK":
+                log.warning(f"[poller] IMAP ID 非 OK ({id_resp.result}): {id_resp.lines}, 继续试 SELECT")
+        except Exception as e:
+            log.warning(f"[poller] IMAP ID 失败 (继续 SELECT 试试): {e!r}")
+
         resp = await client.select(s.imap_folder)
         if resp.result != "OK":
             raise RuntimeError(f"IMAP select {s.imap_folder} failed: {resp.lines}")

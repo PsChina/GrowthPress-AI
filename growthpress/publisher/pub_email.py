@@ -62,14 +62,8 @@ async def send_pub_notification(
     msg.set_content(body)
 
     try:
-        await aiosmtplib.send(
-            msg,
-            hostname=s.smtp_host,
-            port=s.smtp_port,
-            username=s.smtp_user,
-            password=s.smtp_pass.get_secret_value(),
-            start_tls=True,
-        )
+        from ..shared.smtp import smtp_send
+        await smtp_send(msg)
         log.info(f"[pub_email] sent {subject!r} to {s.notify_to}")
         return True
     except Exception as e:
