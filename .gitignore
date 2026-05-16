@@ -11,3 +11,8 @@ data/runs.db-shm
 data/runs.db-wal
 data/drafts/*.md
 !data/drafts/.gitkeep
+
+# 渠道插件: 默认全 ignore. 公开渠道按需在下方白名单解除.
+/plugins/*
+!/plugins/.gitkeep
+# !/plugins/<public-channel-name>/    ← 未来公开渠道在此 unignore

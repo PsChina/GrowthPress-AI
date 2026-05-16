@@ -20,3 +20,26 @@ dependencies = [
     "aioimaplib>=1.1",
     # 调度 (orchestrator)
     "apscheduler>=3.10",
+]
+
+# 渠道插件: 各平台实现 growthpress.publisher.Publisher 协议, 通过 entry_point 注册
+# 当前装法 (xhs-publisher 是私有仓, 不在 PyPI):
+#   uv pip install -e ../xhs-publisher
+# 将来若发 PyPI 或定 git URL, 在此启用 [project.optional-dependencies]:
+#   [project.optional-dependencies]
+#   xhs    = ["xhs-publisher @ git+ssh://git@github.com/PsChina/xhs-publisher.git"]
+#   douyin = ["dy-publisher>=0.1"]
+#   weibo  = ["wb-publisher>=0.1"]
+#   bili   = ["bili-publisher>=0.1"]
+#   wechat = ["wx-publisher>=0.1"]
+#   all    = [...]
+
+[project.scripts]
+growthpress = "growthpress.orchestrator:cli_main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["growthpress"]
