@@ -18,6 +18,8 @@ from typing import Any, Awaitable, Callable
 
 from ..db import Database
 from .handlers import (
+    classify_intent,
+    handle_email_chat,
     handle_email_content,
     handle_email_topic,
     handle_retract_reply,
@@ -126,7 +128,14 @@ async def dispatch_inbound(msg: InboundMsg, db: Database) -> None:
         await handle_route_command(msg, db)
         return
 
-    # UNKNOWN (或降级的 REJECT) — 走启发式
+    # UNKNOWN (或降级的 REJECT) — 优先识别 chat 意图 (subject/body 关键字)
+    # 命中"发"/"发一篇" 等关键字 → email_intake 队列 → email_chat_dispatcher 起 claude.
+    # 不命中走原有启发式 (完整文章 / 喂选题). 选题路径会在 chat 闭环成熟后再统一收编.
+    chat_intent = classify_intent(msg.subject, msg.body_text)
+    if chat_intent:
+        await handle_email_chat(msg, db, intent=chat_intent)
+        return
+
     if looks_like_complete_article(msg.body_text):
         await handle_email_content(msg, db)
     else:

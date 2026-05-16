@@ -28,6 +28,7 @@ from .daily_digest import daily_digest_task
 from .db import Database
 from .mailbox import imap_poller_run
 from .publisher.m4_pump import m4_pump_runs
+from .runners.email_chat_dispatcher import email_chat_dispatcher_run
 from .runners.revising_dispatcher import revising_dispatcher_run
 from .watchdog import watchdog_task
 
@@ -165,6 +166,8 @@ async def main_async() -> None:
                 tg.create_task(daily_digest_task(db), name="daily_digest")
                 # 新: 派工给 claude CLI 改稿 (用户 APV 回 "改 X" 后)
                 tg.create_task(revising_dispatcher_run(db), name="revising_dispatcher")
+                # 新: 派工给 claude CLI 发新内容 (用户邮件 subject 含"发"/"发一篇"关键字后)
+                tg.create_task(email_chat_dispatcher_run(db), name="email_chat_dispatcher")
                 tg.create_task(_wait_stop(stop, tg), name="stop_watcher")
         except* asyncio.CancelledError:
             pass  # TaskGroup 收到 stop 信号正常退出

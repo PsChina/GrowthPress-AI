@@ -110,6 +110,25 @@ CREATE TABLE IF NOT EXISTS state_log (
     reason     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_state_log_draft ON state_log(draft_id, at);
+
+-- email-chat 队列: 用户邮件触发 claude subprocess 的入口
+-- intent='post' (subject 含"发"/"发一篇" 等关键字) → claude 走 growthpress-post skill 全套
+-- intent='chat' (其他) → MVP 不处理, 留扩展
+CREATE TABLE IF NOT EXISTS email_intake (
+    id            TEXT PRIMARY KEY,        -- uuid 前 8 位
+    message_id    TEXT UNIQUE,             -- 防同邮件被 IMAP poller 重拉重跑
+    sender        TEXT NOT NULL,           -- RFC822 from
+    subject       TEXT NOT NULL,
+    body_text     TEXT NOT NULL,
+    intent        TEXT NOT NULL,           -- post | chat
+    state         TEXT NOT NULL,           -- pending | processing | done | failed
+    claude_run_id TEXT,                    -- 起 claude subprocess 后回填
+    draft_id      TEXT,                    -- claude 创建出的 draft id (intent=post)
+    error         TEXT,
+    created_at    TIMESTAMP NOT NULL,
+    updated_at    TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_email_intake_state ON email_intake(state, created_at);
 """
 
 PRAGMAS = [
