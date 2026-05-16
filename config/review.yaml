@@ -1,0 +1,20 @@
+human_approval:
+  enabled: true
+  scope: global                       # global | per_platform | per_topic
+  timeout_hours: 24
+  reminder_count: 3
+  reminder_interval_hours: 24
+  on_no_reply: hold                   # hold | drop  (不允许 default auto-publish)
+
+revise:
+  max_rounds: 2
+  on_exceed: human_queue              # 超 2 轮丢人工队列
+
+compliance:
+  blocklist_path: config/blocklist.txt
+  llm_threshold: 0.8
+
+quality:
+  min_score: 70                       # 0-100, < 70 退回 Writer
+
+retract_window_hours: 24

@@ -1,0 +1,15 @@
+smtp:
+  host: ${SMTP_HOST}
+  port: ${SMTP_PORT}
+  user: ${SMTP_USER}
+  pass: ${SMTP_PASS}                  # Gmail App Password (不是登录密码)
+
+imap:
+  host: ${IMAP_HOST}
+  port: ${IMAP_PORT}
+  user: ${IMAP_USER}
+  pass: ${IMAP_PASS}
+  folder: ${IMAP_FOLDER}
+  poll_interval_sec: 30
+
+notify_to: ${NOTIFY_TO}

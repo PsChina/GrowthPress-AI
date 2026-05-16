@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.DS_Store
+.env
+data/runs.db
+data/runs.db-shm
+data/runs.db-wal
+data/drafts/*.md
+!data/drafts/.gitkeep

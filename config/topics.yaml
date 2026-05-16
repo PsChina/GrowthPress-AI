@@ -1,0 +1,14 @@
+# 选题清单. scheduler 按 schedule (cron) 跑.
+# 示例 2 个, 上线后按需增删.
+
+- name: ai-news-daily
+  query: "AI / LLM / agent 最近 7 天动态"
+  schedule: "0 9 * * *"               # 每天 9 点
+  platforms: [juejin, csdn, zhihu]    # 不发小红书 (技术文不适合)
+  human_approval: true                # 覆盖全局 (如 review.yaml scope=per_topic)
+
+- name: dev-tips
+  query: "VSCode / Claude Code / 开发工具技巧"
+  schedule: "0 21 * * *"
+  platforms: [juejin, xiaohongshu]
+  human_approval: false               # 快路径
