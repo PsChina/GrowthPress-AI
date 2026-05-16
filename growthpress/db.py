@@ -22,6 +22,11 @@ CREATE TABLE IF NOT EXISTS drafts (
     body_md      TEXT,
     summary      TEXT,
     sources      TEXT,                    -- JSON array
+    media        TEXT DEFAULT '[]',       -- JSON array of LOCAL image paths.
+                                          -- m1 在生成阶段调 web_search 找 URL → 立刻下载到
+                                          -- data/images/<draft_id>/ → 表里存本地路径.
+                                          -- m4 publisher 直接用, 不再下载 (素材一旦入库就稳).
+                                          -- markdown body 里不嵌图 URL, 避免图文混排出错.
     state        TEXT NOT NULL,           -- new | reviewing | revising | approved |
                                           -- publishing | published | archived |
                                           -- pending_human | pending_long | human_queue
@@ -115,6 +120,19 @@ PRAGMAS = [
 ]
 
 
+async def _migrate(conn: aiosqlite.Connection) -> None:
+    """轻量 migration: SCHEMA 用 CREATE TABLE IF NOT EXISTS, 不会改既存表的列.
+
+    新增列时, 这里 PRAGMA 检查 + ALTER. 不动数据, 旧行的新列拿默认值.
+    """
+    cur = await conn.execute("PRAGMA table_info(drafts)")
+    cols = {row[1] for row in await cur.fetchall()}
+    if "media" not in cols:
+        await conn.execute(
+            "ALTER TABLE drafts ADD COLUMN media TEXT DEFAULT '[]'"
+        )
+
+
 class Database:
     def __init__(self, conn: aiosqlite.Connection):
         self.conn = conn
@@ -136,6 +154,7 @@ class Database:
             for pragma in PRAGMAS:
                 await conn.execute(pragma)
             await conn.executescript(SCHEMA)
+            await _migrate(conn)
             await conn.commit()
             yield cls(conn)
         finally:

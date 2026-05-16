@@ -15,14 +15,14 @@ from .core.settings import get_settings
 
 log = logging.getLogger("growthpress.preflight")
 
-# 缺这些 LLM 完全跑不了 (m1 / m2 都依赖)
-CRITICAL: tuple[str, ...] = ("llm_api_key",)
+# 新架构: GrowthPress 不内置 LLM (大脑由外部 claude CLI 担任), 无关键阻塞字段.
+# 邮件配置不齐时各 task 自己 graceful exit, daemon 仍能起来.
+CRITICAL: tuple[str, ...] = ()
 
-# 缺这些只影响对应模块 (graceful exit), 但功能不完整
 RECOMMENDED: dict[str, str] = {
     "smtp_user":  "m3 APV / m4 PUB / 日报 邮件无法发出",
     "smtp_pass":  "同上 (Gmail 用 App Password)",
-    "imap_user":  "m5 mailbox 收回信无法工作 (审批/撤销 等单向通知仍可)",
+    "imap_user":  "mailbox 收回信无法工作 (审批/撤销 等单向通知仍可)",
     "imap_pass":  "同上",
     "notify_to":  "审核员邮箱 — 各类通知都发到这里",
 }
@@ -50,7 +50,7 @@ def warn(*, source: str = "preflight") -> bool:
         return True
     if critical:
         log.error(
-            f"[{source}] ⚠ 缺关键字段: {critical} — LLM 调用会失败. "
+            f"[{source}] ⚠ 缺关键字段: {critical}. "
             f"运行 'uv run growthpress-setup' 配置"
         )
     if recommended:
@@ -77,7 +77,6 @@ def maybe_interactive(*, source: str = "preflight") -> None:
 
     print()
     print(f"⚠ [{source}] 缺关键配置: {critical}")
-    print("  不配置 LLM 调用会失败 (m1 调研无法跑).")
     try:
         val = input("  现在跑 growthpress-setup 交互向导? [Y/n]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):

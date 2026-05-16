@@ -25,9 +25,14 @@ import yaml
 
 from ...core import get_settings
 from ...db import Database
-from ...scout_writer.topics import DEFAULT_PATH, EXAMPLE_PATH
 from ..schemas import InboundMsg
 from ..subject_parser import SubjectKind, parse_subject
+
+# 主题路线 yaml 路径 (旧 scout_writer.topics 模块已删, 这里内联).
+# 新架构下 yaml 不再驱动 daemon, 只是 Claude 工作流可选读的选题候选清单.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_PATH = _REPO_ROOT / "config" / "topics.yaml"
+EXAMPLE_PATH = _REPO_ROOT / "config" / "topics.example.yaml"
 
 log = logging.getLogger("growthpress.mailbox.route_command")
 

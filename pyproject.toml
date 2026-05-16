@@ -1,7 +1,7 @@
 [project]
 name = "GrowthPress-AI"
-version = "0.1.0"
-description = "GrowthPress AI — 内容自动化数字员工: Scout+Writer → Reviewer → Approver → Publisher → Mailbox"
+version = "0.2.0"
+description = "GrowthPress 工具腰带 — 给 claude CLI 当数字员工的发布/审批/通知/状态机后台. 大脑是 Claude 主对话, GrowthPress 不内置 LLM."
 requires-python = ">=3.11"
 dependencies = [
     # 核心
@@ -12,16 +12,17 @@ dependencies = [
     "pydantic-settings>=2.4",
     "tenacity>=8.2",
     "pyyaml>=6.0",
-    # LLM (m0 core: 统一 client + provider switch)
-    "anthropic>=0.40",
-    "openai>=1.40",
-    # 邮件 (m3/m4/m5)
+    # 邮件 (approver 发 / mailbox 收)
     "aiosmtplib>=3.0",
     "aioimaplib>=1.1",
-    # 调度 (orchestrator)
+    # 调度 (orchestrator daemon TaskGroup)
     "apscheduler>=3.10",
-    "json5>=0.14.0",
+    # publisher 插件 — 通过 entry_points 注册. 本地 plugins/ 路径见 [tool.uv.sources]
+    "xhs-publisher",
 ]
+
+[tool.uv.sources]
+xhs-publisher = { path = "plugins/xhs-publisher", editable = true }
 
 # 渠道插件: 各平台实现 growthpress.publisher.Publisher 协议, 通过 entry_point 注册
 # 当前装法 (xhs-publisher 是私有仓, 不在 PyPI):

@@ -31,15 +31,14 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ===== LLM (m0) — anthropic SDK 走任一 Anthropic-兼容端点 =====
+    # ===== LLM 配置 (legacy, 暂留) =====
+    # 新架构: 大脑由外部 claude CLI 担任, 这些字段 GrowthPress 内部已不再使用.
+    # 旧 .env 兼容性保留, 后续可清理. 不删 SecretStr 默认避免 missing-key 启动报错.
     llm_api_key: SecretStr = SecretStr("")
-    llm_base_url: str = "https://api.deepseek.com/anthropic"
-    llm_model: str = "deepseek-v4-pro[1m]"   # m1 默认 (单模型). 切真 Anthropic 改 claude-sonnet-4-5
-    # m2+ 经 llm_router, 按 task → flash / pro 选模型
-    llm_model_flash: str = "deepseek-v4-flash[1m]"   # 短/规则任务 (合规检测/分类/平台适配)
-    llm_model_pro:   str = "deepseek-v4-pro[1m]"     # 创作/深推 (写作/质量审/改稿)
+    llm_base_url: str = ""
+    llm_model: str = ""
 
-    # ===== SMTP (m3/m4/m5 发邮件) =====
+    # ===== SMTP (m3 / 邮件通知 发邮件) =====
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 587
     smtp_user: str = ""

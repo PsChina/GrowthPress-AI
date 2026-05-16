@@ -10,9 +10,11 @@ W1 默认 dry_run=True (流程跑通不真发). 真发需要:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from ..db import Database
 from .agent import discover_platforms
@@ -39,7 +41,7 @@ async def m4_pump_runs(db: Database, *, dry_run: bool = True) -> None:
     while True:
         try:
             rows = await db.read(
-                "SELECT id, title, summary, body_md, sources "
+                "SELECT id, title, summary, body_md, sources, media "
                 "FROM drafts WHERE state='publishing' ORDER BY updated_at LIMIT 5"
             )
             for r in rows:
@@ -101,12 +103,20 @@ async def _publish_one(draft: dict, db: Database, *, dry_run: bool) -> None:
         f"(dry_run={dry_run})"
     )
 
-    # 3. 造 Content (W1 简化: image_note, media 空)
+    # 3. 造 Content. media 是 m1 阶段已下载到本地的图片路径 list.
+    # 如果 m1 没找到图 (draft.media=[]), publisher 会按平台约束返失败 (例: xhs invalid_input).
+    try:
+        media_paths = json.loads(draft.get("media") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        media_paths = []
+    # 只保留实际存在的文件 (m1 下载有失败、文件被手动删等情况)
+    media_paths = [p for p in media_paths if Path(p).is_file()]
+
     content: Content = {
         "type": ContentType.IMAGE_NOTE,
         "title": draft["title"] or "",
         "body": draft["body_md"] or "",
-        "media": [],
+        "media": media_paths,
         "tags": [],
         "meta": {},
     }

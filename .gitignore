@@ -11,6 +11,9 @@ data/runs.db-shm
 data/runs.db-wal
 data/drafts/*.md
 !data/drafts/.gitkeep
+# Claude 工作流下载的图片素材 (跑一次发一次, 不入 git)
+data/test-images/
+data/images/
 
 # 渠道插件: 默认全 ignore. 公开渠道按需在下方白名单解除.
 /plugins/*
