@@ -89,36 +89,88 @@ async def resume_pending(db: Database) -> None:
 _PID_FILE = Path(__file__).resolve().parent.parent / "data" / "daemon.pid"
 
 
-def _acquire_single_instance_lock() -> int:
-    """单实例锁: 写 PID 到 data/daemon.pid. 已有活进程拒绝启动.
+def _scan_sibling_daemons() -> list[tuple[int, str]]:
+    """ps 扫所有进程, 找其他 growthpress daemon (排除本进程 + uv run wrapper).
 
-    场景: 用户 / launchd 反复启动 daemon, 又因 IMAP hang 没退干净, 堆积多个进程
-    抢同一邮箱. 加 PID file 检查防御.
+    比 PID file 鲁棒 — 即使用户 `rm -f daemon.pid` 删了锁文件, 老 daemon 仍
+    被发现 (ps 不撒谎). 返回 [(pid, cmd 摘要)].
 
-    返回: 当前进程 PID (lock acquired). 抛 SystemExit 表示已有活实例.
+    匹配规则: command 含 '.venv/bin/growthpress' (python entry-point binary 路径,
+    'uv run growthpress' 父 wrapper 不含此路径所以不会误伤).
     """
     import os
-    if _PID_FILE.exists():
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["ps", "-ax", "-o", "pid=,command="],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        log.warning(f"[singleton] ps 扫描失败 ({e!r}), 跳过 sibling 检测 — "
+                    "锁退化为 PID-file-only, 风险: 若你 rm -f daemon.pid 加重启,"
+                    " 双 daemon 不会被拦住")
+        return []
+
+    me = os.getpid()
+    siblings: list[tuple[int, str]] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
         try:
-            old = int(_PID_FILE.read_text().strip())
-        except (ValueError, OSError):
-            old = 0
-        if old > 0:
-            try:
-                os.kill(old, 0)   # signal 0 = 只查存活, 不发信号
-                log.error(
-                    f"[singleton] 已有 daemon 实例运行 (pid={old}). "
-                    f"如确认要重启, 先 `kill {old}` 再起. 若进程已死残留 PID, "
-                    f"删 {_PID_FILE} 后重试."
-                )
-                raise SystemExit(3)
-            except ProcessLookupError:
-                log.warning(
-                    f"[singleton] 残留 PID file (pid={old} 已不存在), 覆盖重新获取锁"
-                )
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        if pid == me:
+            continue
+        cmd = parts[1]
+        if ".venv/bin/growthpress" in cmd:
+            siblings.append((pid, cmd[:150]))
+    return siblings
+
+
+def _acquire_single_instance_lock() -> int:
+    """单实例锁: ps 进程扫 + PID file 双层防御. 已有活 daemon 拒绝启动.
+
+    场景: 用户 / launchd 反复启动 daemon, 老进程因 IMAP hang 没退干净 → 堆积多
+    进程抢同一邮箱 / 同一 publishing draft, 导致一篇被发 2 遍.
+
+    锁的两层防御:
+      1. ps -ax 扫 .venv/bin/growthpress 进程 — 真相在内核 process table, 即使
+         用户 rm -f daemon.pid 删了锁文件, ps 仍能看到老进程
+      2. PID file (info 用) — 方便 kill $(cat daemon.pid) 这种快捷写法, 但不是
+         lock 决策的依据
+
+    场景对照表:
+      - 老 daemon 死透 + PID file 残留    → ps 扫无 sibling, 写新 PID, 启动 ✓
+      - 老 daemon 死透 + PID file 已删    → ps 扫无 sibling, 写新 PID, 启动 ✓
+      - 老 daemon 还活 + PID file 残留    → ps 扫到 sibling, refuse + 报错 ✗
+      - 老 daemon 还活 + PID file 已删    → ps 扫到 sibling, refuse + 报错 ✗ ★
+        (★ 是这次修的 bug — 之前依赖 PID file 存在性, 用户 rm -f 会绕过锁)
+
+    返回: 当前进程 PID. 抛 SystemExit(3) 表示已有活实例.
+    """
+    import os
+
+    siblings = _scan_sibling_daemons()
+    if siblings:
+        for pid, cmd in siblings:
+            log.error(
+                f"[singleton] 已有 daemon 实例运行 (pid={pid}). cmd: {cmd}\n"
+                f"    如要重启, 先 `kill {pid}` (验证 `ps -p {pid}` 真死了) 再起.\n"
+                f"    不要 `rm -f {_PID_FILE}` 绕过 — 那不能让旧进程死, 只会让\n"
+                f"    新 daemon 起来后两个抢同一邮箱 / 重复发同一篇 (本 bug 的成因)."
+            )
+        raise SystemExit(3)
+
+    # PID file 仅作 info / 便利 (kill $(cat ...) 用), 不是锁决策依据
     _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     _PID_FILE.write_text(str(os.getpid()))
-    log.info(f"[singleton] 获取锁: pid={os.getpid()} → {_PID_FILE}")
+    log.info(f"[singleton] 获取锁: pid={os.getpid()} → {_PID_FILE} "
+             f"(ps 扫无 sibling)")
     return os.getpid()
 
 
