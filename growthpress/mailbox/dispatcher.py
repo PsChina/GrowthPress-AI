@@ -72,13 +72,33 @@ async def _call_approval_reply(msg: InboundMsg, db: Database) -> None:
 
 
 async def dispatch_inbound(msg: InboundMsg, db: Database) -> None:
-    """单封邮件按 subject + 正文启发式分发到 6 通道之一. 异常向上抛 (poller 兜)."""
+    """单封邮件按 subject + 正文启发式分发到 6 通道之一. 异常向上抛 (poller 兜).
+
+    自反馈防护: SMTP_USER == IMAP_USER (同一邮箱发收) 时, daemon 自己发的 PUB / FAIL /
+    Unknown 提示信 / 日报 等会被 IMAP 拉回. 它们带 [PUB-] [FAIL-] 等 daemon 自身 prefix,
+    不属于"用户命令". 直接丢弃避免被 email_topic 当成新 draft 入库.
+    """
     info = parse_subject(msg.subject)
     log.info(
         f"[m5/dispatch] uid={msg.uid} kind={info.kind.value} "
         f"token={info.token!r} sender={msg.sender!r} "
         f"subject={msg.subject[:80]!r}"
     )
+
+    # 防自反馈: subject 带 daemon 自身 prefix 的视为"自己发的", 直接丢弃.
+    # 用户回 APV 时 subject 是 "Re: [APV-...]" — APPROVAL_REPLY 在下面单独路由, 不走这里.
+    # daemon 自己发的 [PUB-...] [FAIL-...] [PEND-...] 主题前缀都进这个黑名单.
+    self_prefixes = ("[pub-", "[fail-", "[pend-")
+    subject_lower = (msg.subject or "").lower().lstrip()
+    # 兼容 "回复: [FAIL-...]" / "Re: [FAIL-...]" — 用户不应该回 daemon 的通知信,
+    # 即使回了, 也按本身 prefix 决定走的通道 (RETRACT_REPLY 等), 别进 email_topic.
+    if any(p in subject_lower for p in self_prefixes):
+        if info.kind == SubjectKind.UNKNOWN:
+            log.info(
+                f"[m5/dispatch] 丢弃 daemon 自身通知邮件 (无路由): "
+                f"subject={msg.subject[:80]!r}"
+            )
+            return
 
     if info.kind == SubjectKind.APPROVAL_REPLY:
         await _call_approval_reply(msg, db)

@@ -19,7 +19,7 @@ from pathlib import Path
 from ..db import Database
 from .agent import discover_platforms
 from .base import Content, ContentType, PublishResult
-from .pub_email import send_pub_notification
+from .pub_email import send_pub_notification, send_publish_failure_notification
 
 log = logging.getLogger("growthpress.publisher.m4")
 
@@ -103,14 +103,14 @@ async def _publish_one(draft: dict, db: Database, *, dry_run: bool) -> None:
         f"(dry_run={dry_run})"
     )
 
-    # 3. 造 Content. media 是 m1 阶段已下载到本地的图片路径 list.
-    # 如果 m1 没找到图 (draft.media=[]), publisher 会按平台约束返失败 (例: xhs invalid_input).
+    # 3. 造 Content. media 是 Claude CLI 落 draft 时存的本地图片路径 list.
+    # 必须传 list[Path] 给 publisher (xhs publish_image_note 用 .is_file() 等 Path API,
+    # 给 str 会 AttributeError). cli.py publish-now 同样处理, 这里对齐.
     try:
-        media_paths = json.loads(draft.get("media") or "[]")
+        media_paths_str = json.loads(draft.get("media") or "[]")
     except (json.JSONDecodeError, TypeError):
-        media_paths = []
-    # 只保留实际存在的文件 (m1 下载有失败、文件被手动删等情况)
-    media_paths = [p for p in media_paths if Path(p).is_file()]
+        media_paths_str = []
+    media_paths = [Path(p) for p in media_paths_str if Path(p).is_file()]
 
     content: Content = {
         "type": ContentType.IMAGE_NOTE,
@@ -167,6 +167,17 @@ async def _publish_one(draft: dict, db: Database, *, dry_run: bool) -> None:
             log.warning(
                 f"[m4] {draft_id} ✗ {r['platform']}: "
                 f"{r.get('error')}: {r.get('error_detail')}"
+            )
+            # 发 FAIL 通知邮件 (不可观测的 silent failure 是数字员工最危险的失败模式)
+            await send_publish_failure_notification(
+                publication_id=publication_id,
+                draft_id=draft_id,
+                title=draft.get("title") or "",
+                platform=r.get("platform", "unknown"),
+                error=r.get("error"),
+                error_detail=r.get("error_detail"),
+                elapsed_sec=float(r.get("elapsed_sec", 0)),
+                dry_run=dry_run,
             )
 
     # 6. state 变迁

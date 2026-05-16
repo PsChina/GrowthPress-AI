@@ -14,9 +14,19 @@ from .schemas import Action, Approve, Drop, Reject, Unknown
 KNOWN_PLATFORMS: tuple[str, ...] = ("juejin", "csdn", "zhihu", "xiaohongshu")
 
 # 首词分类: 中英混合, 大小写不敏感 (lower 后比对).
-_APPROVE_HEADS = {"ok", "yes", "通过", "发", "approve"}
-_REJECT_HEADS  = {"改", "no", "退", "reject"}
-_DROP_HEADS    = {"drop", "丢", "弃", "archive"}
+# 中文同义词收尽量全, 避免用户回个常用中文词 (批准/同意/确认) 被错判 Unknown.
+_APPROVE_HEADS = {
+    "ok", "yes", "y", "approve", "approved",
+    "通过", "批准", "同意", "确认", "可", "可以", "好", "好的", "发", "发吧",
+}
+_REJECT_HEADS  = {
+    "no", "n", "reject", "rejected",
+    "改", "退", "拒绝", "驳回", "重写", "重发", "不行", "不通过", "改一下", "修改",
+}
+_DROP_HEADS    = {
+    "drop", "archive", "discard",
+    "丢", "弃", "丢弃", "归档", "删", "删除", "废", "废了", "撤", "撤回",
+}
 
 # 邮件回复常见尾巴 (quoted block / signature) — 取第一行非空 + 在 quote 之前.
 _QUOTE_PREFIX_RE = re.compile(r"^[>|]")
@@ -49,10 +59,16 @@ def _strip_quotes_and_signature(body: str) -> str:
         # 163 / QQ / Foxmail 中文: "在 2026-05-16 17:42:35, ... 写道:"
         if re.match(r"^在\s*\d{4}[-/]\d{1,2}[-/]\d{1,2}.{0,80}写道[:：]?\s*$", stripped):
             break
-        # 苹果邮件 / 钉钉邮: "----- 原始邮件 -----" / "原始邮件" 单行
-        if re.match(r"^-{2,}\s*(?:原始邮件|Original Message)\s*-{2,}\s*$", stripped):
+        # 各邮箱客户端的引用块开头. 短横数量 / 文案各异:
+        # 苹果邮件 / 钉钉:   "----- 原始邮件 -----"
+        # 163 邮箱客户端:    "---- 回复的原邮件 ----"  (4 短横, "回复的原邮件")
+        # Outlook / Foxmail: "-----Original Message-----"
+        if re.match(
+            r"^-{2,}\s*(?:回复的原邮件|原始邮件|Original Message)\s*-{2,}\s*$",
+            stripped,
+        ):
             break
-        if stripped in ("原始邮件", "Original Message"):
+        if stripped in ("原始邮件", "Original Message", "回复的原邮件"):
             break
         # 引用块头: 单独一行的 "发件人:" / "From:" 表示引用块开始
         if re.match(r"^(?:发件人|From|发送时间|Sent|主题|Subject|收件人|To)\s*[:：]", stripped):

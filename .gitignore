@@ -9,6 +9,7 @@ dist/
 data/runs.db
 data/runs.db-shm
 data/runs.db-wal
+data/daemon.pid
 data/drafts/*.md
 !data/drafts/.gitkeep
 # Claude 工作流下载的图片素材 (跑一次发一次, 不入 git)

@@ -85,8 +85,66 @@ async def resume_pending(db: Database) -> None:
         log.info("[resume] 无 in-flight drafts")
 
 
+_PID_FILE = Path(__file__).resolve().parent.parent / "data" / "daemon.pid"
+
+
+def _acquire_single_instance_lock() -> int:
+    """单实例锁: 写 PID 到 data/daemon.pid. 已有活进程拒绝启动.
+
+    场景: 用户 / launchd 反复启动 daemon, 又因 IMAP hang 没退干净, 堆积多个进程
+    抢同一邮箱. 加 PID file 检查防御.
+
+    返回: 当前进程 PID (lock acquired). 抛 SystemExit 表示已有活实例.
+    """
+    import os
+    if _PID_FILE.exists():
+        try:
+            old = int(_PID_FILE.read_text().strip())
+        except (ValueError, OSError):
+            old = 0
+        if old > 0:
+            try:
+                os.kill(old, 0)   # signal 0 = 只查存活, 不发信号
+                log.error(
+                    f"[singleton] 已有 daemon 实例运行 (pid={old}). "
+                    f"如确认要重启, 先 `kill {old}` 再起. 若进程已死残留 PID, "
+                    f"删 {_PID_FILE} 后重试."
+                )
+                raise SystemExit(3)
+            except ProcessLookupError:
+                log.warning(
+                    f"[singleton] 残留 PID file (pid={old} 已不存在), 覆盖重新获取锁"
+                )
+    _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _PID_FILE.write_text(str(os.getpid()))
+    log.info(f"[singleton] 获取锁: pid={os.getpid()} → {_PID_FILE}")
+    return os.getpid()
+
+
+def _release_single_instance_lock() -> None:
+    """退出时清 PID file. 失败仅 log."""
+    try:
+        if _PID_FILE.exists():
+            _PID_FILE.unlink()
+            log.info(f"[singleton] 释放锁: {_PID_FILE}")
+    except OSError as e:
+        log.warning(f"[singleton] 清 PID file 失败 (忽略): {e!r}")
+
+
 async def main_async() -> None:
-    log.info(f"GrowthPress AI v{__version__} 启动, db={DB_PATH}")
+    # 单实例锁 (防 daemon 假死时反复启动堆积进程, 抢同一邮箱 → 全部 hang)
+    _acquire_single_instance_lock()
+
+    # m4 真发开关 — 默认 dry_run=True (安全). 设 DAEMON_PUBLISHER_DRY_RUN=false 真发到平台.
+    import os
+    dry_run_str = os.environ.get("DAEMON_PUBLISHER_DRY_RUN", "true").lower()
+    publisher_dry_run = dry_run_str not in ("false", "0", "no", "off")
+
+    log.info(
+        f"GrowthPress AI v{__version__} 启动, db={DB_PATH}, "
+        f"publisher dry_run={publisher_dry_run} "
+        f"(env DAEMON_PUBLISHER_DRY_RUN={dry_run_str!r})"
+    )
     async with AsyncExitStack() as stack:
         db = await stack.enter_async_context(Database.open(DB_PATH))
         await resume_pending(db)
@@ -96,10 +154,11 @@ async def main_async() -> None:
             asyncio.get_running_loop().add_signal_handler(sig, stop.set)
 
         try:
+            stack.callback(_release_single_instance_lock)
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(db.writer_loop(), name="db_writer")
                 tg.create_task(m3_pump_runs(db), name="m3_pump")
-                tg.create_task(m4_pump_runs(db, dry_run=True), name="m4_pump")
+                tg.create_task(m4_pump_runs(db, dry_run=publisher_dry_run), name="m4_pump")
                 tg.create_task(imap_poller_run(db), name="imap_poller")
                 tg.create_task(pending_watch(db), name="pending_watch")
                 tg.create_task(watchdog_task(db), name="watchdog")
@@ -123,6 +182,14 @@ def cli_main() -> int:
     ap.add_argument("--log-level", default="INFO",
                     choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = ap.parse_args()
+
+    # stdout/stderr 行缓冲 — daemon 跑在 launchd / pipe 下默认 block-buffer,
+    # log 不及时刷会让"看不见错误"看起来像 silent failure. 强制 line-buffered.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
 
     logging.basicConfig(
         level=args.log_level,

@@ -35,6 +35,13 @@ log = logging.getLogger("growthpress.mailbox.poller")
 
 POLL_INTERVAL_SEC = 30
 
+# 各 IMAP 命令的细粒度超时 (秒). aioimaplib IMAP4_SSL(timeout=30) 只管连接握手,
+# 命令执行期间不生效 — 必须手动 wait_for 每条命令.
+_T_LOGIN   = 30  # login / select / id / search: 服务器快速响应
+_T_FETCH   = 60  # fetch RFC822: 附件大邮件可能慢
+_T_STORE   = 60  # store \Seen: 同上
+_T_LOGOUT  = 5   # logout: 不重要, 短超时
+
 
 # ---------- 邮件解析 (RFC822 → InboundMsg) ----------
 
@@ -111,6 +118,9 @@ async def _poll_once(db: Database) -> int:
 
     返回本轮处理的邮件数 (含失败), 用于日志统计.
     任何异常向上抛 (poller 主循环兜).
+
+    每条 IMAP 命令单独 wait_for, 避免单条命令 hang 吃掉整轮 90s 兜底.
+    超时 → RuntimeError → 外层 90s 兜住 → 下轮重试.
     """
     from aioimaplib import aioimaplib  # 局部 import, 避免模块加载就强依赖
 
@@ -121,17 +131,20 @@ async def _poll_once(db: Database) -> int:
     await client.wait_hello_from_server()
 
     try:
-        resp = await client.login(s.imap_user, s.imap_pass.get_secret_value())
+        # --- login ---
+        try:
+            resp = await asyncio.wait_for(
+                client.login(s.imap_user, s.imap_pass.get_secret_value()),
+                timeout=_T_LOGIN,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"IMAP login 超时 (>{_T_LOGIN}s)")
         if resp.result != "OK":
             raise RuntimeError(f"IMAP login failed: {resp.result} {resp.lines}")
 
-        # 网易 (163 / 126 / yeah.net) 强制要求客户端在 LOGIN 后发 IMAP ID 注明身份,
-        # 否则 SELECT 报 "Unsafe Login. Please contact kefu@188.com". RFC 2971.
-        #
-        # aioimaplib.id(**kwargs) 默认序列化是 `( "name" "x" ... )` (括号后有空格),
-        # 163 解析挂报 'BAD: Parse command error'. 必须手动构造 `("name" "x" ...)`
-        # (左括号紧贴第一个字段). 用 raw Command 绕过 arguments_rfs2971.
-        # Gmail / Outlook / QQ 不要求但接受这种格式, 兼容性无害.
+        # --- IMAP ID (网易 163/126 强制要求, 其他服务器兼容) ---
+        # 原注: aioimaplib.id() 序列化有括号空格 bug, 用 raw Command 绕过.
+        # RFC 2971. Gmail / Outlook / QQ 兼容此格式, 无害.
         try:
             from aioimaplib.aioimaplib import Command
             notify = s.notify_to or s.imap_user
@@ -143,19 +156,36 @@ async def _poll_once(db: Database) -> int:
                 '"support-email"', f'"{notify}")',
                 loop=asyncio.get_event_loop(),
             )
-            id_resp = await client.protocol.execute(cmd)
+            id_resp = await asyncio.wait_for(
+                client.protocol.execute(cmd),
+                timeout=_T_LOGIN,
+            )
             if id_resp.result != "OK":
                 log.warning(f"[poller] IMAP ID 非 OK ({id_resp.result}): {id_resp.lines}, 继续试 SELECT")
+        except asyncio.TimeoutError:
+            log.warning(f"[poller] IMAP ID 超时 (>{_T_LOGIN}s), 继续试 SELECT")
         except Exception as e:
             log.warning(f"[poller] IMAP ID 失败 (继续 SELECT 试试): {e!r}")
 
-        resp = await client.select(s.imap_folder)
+        # --- select ---
+        try:
+            resp = await asyncio.wait_for(
+                client.select(s.imap_folder),
+                timeout=_T_LOGIN,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"IMAP select 超时 (>{_T_LOGIN}s)")
         if resp.result != "OK":
             raise RuntimeError(f"IMAP select {s.imap_folder} failed: {resp.lines}")
 
-        # search UNSEEN — 拿 UID 列表
-        resp = await client.uid_search("UNSEEN") if hasattr(client, "uid_search") \
-            else await client.uid("search", "UNSEEN")
+        # --- search UNSEEN ---
+        try:
+            if hasattr(client, "uid_search"):
+                resp = await asyncio.wait_for(client.uid_search("UNSEEN"), timeout=_T_LOGIN)
+            else:
+                resp = await asyncio.wait_for(client.uid("search", "UNSEEN"), timeout=_T_LOGIN)
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"IMAP search UNSEEN 超时 (>{_T_LOGIN}s)")
         if resp.result != "OK":
             log.warning(f"[poller] search UNSEEN 失败: {resp.lines}")
             return 0
@@ -184,11 +214,11 @@ async def _poll_once(db: Database) -> int:
                     f"[poller] uid={uid} fetch/dispatch 失败: {e!r}",
                     exc_info=True,
                 )
-                # 单封失败不标 \\Seen, 下轮重试
+                # 单封失败不标 \Seen, 下轮重试
         return processed
     finally:
         try:
-            await client.logout()
+            await asyncio.wait_for(client.logout(), timeout=_T_LOGOUT)
         except Exception as e:
             log.debug(f"[poller] logout 异常 (忽略): {e!r}")
 
@@ -199,9 +229,16 @@ async def _fetch_and_dispatch(
     """fetch 单封 → parse → dispatch → STORE \\Seen.
 
     fetch 用 RFC822 (整封原文), 简化解析. UID-based 命令防 reindex 问题.
+    fetch / store 各自 wait_for, 防大附件邮件 hang 整轮.
     """
-    # fetch RFC822 — aioimaplib uid("fetch", uid, "(RFC822)")
-    resp = await client.uid("fetch", str(uid), "(RFC822)")
+    # --- fetch RFC822 ---
+    try:
+        resp = await asyncio.wait_for(
+            client.uid("fetch", str(uid), "(RFC822)"),
+            timeout=_T_FETCH,
+        )
+    except asyncio.TimeoutError:
+        raise RuntimeError(f"uid fetch {uid} 超时 (>{_T_FETCH}s)")
     if resp.result != "OK":
         raise RuntimeError(f"uid fetch {uid} failed: {resp.lines}")
 
@@ -230,8 +267,15 @@ async def _fetch_and_dispatch(
     # dispatch (任何 handler 异常向上抛, 由 _poll_once 单封 try 包)
     await dispatch_inbound(msg, db)
 
-    # 处理成功 → STORE \\Seen 防重复
-    resp = await client.uid("store", str(uid), "+FLAGS", r"(\Seen)")
+    # --- 处理成功 → STORE \Seen 防重复 ---
+    try:
+        resp = await asyncio.wait_for(
+            client.uid("store", str(uid), "+FLAGS", r"(\Seen)"),
+            timeout=_T_STORE,
+        )
+    except asyncio.TimeoutError:
+        log.warning(f"[poller] uid={uid} STORE \\Seen 超时 (>{_T_STORE}s), 下轮可能重处理")
+        return
     if resp.result != "OK":
         log.warning(f"[poller] uid={uid} STORE \\Seen 失败: {resp.lines}")
     else:
@@ -261,9 +305,16 @@ async def imap_poller_run(db: Database) -> None:
 
     while True:
         try:
-            n = await _poll_once(db)
+            # 整轮 90s 硬超时兜底 — IMAP logout / store 偶尔 hang (实测过 daemon 跑半小时
+            # 后 poller 卡死, CPU 0% 进程在但不再 poll). 超时让 client 自然 GC + 下轮新建.
+            n = await asyncio.wait_for(_poll_once(db), timeout=90)
             if n:
                 log.info(f"[poller] 本轮处理 {n} 封")
+        except asyncio.TimeoutError:
+            log.error(
+                "[poller] _poll_once 90s 超时, 等下轮重试 (可能 IMAP hang). "
+                "下轮会新建 IMAP 连接, 上一轮的 client 由 GC 回收"
+            )
         except asyncio.CancelledError:
             log.info("[poller] cancelled, 退出")
             raise

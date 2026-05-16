@@ -5,7 +5,7 @@
   2. 生成 pub_id (uuid 前 6 位)
   3. 拿 draft 详情 (title / summary / body_md + file:// 路径)
   4. INSERT approvals (state=pending, expires_at=now+24h)
-  5. SMTP 发邮件给 settings.notify_to
+  5. SMTP 发邮件给 settings.notify_to (含图片附件 inline)
   6. 返回 pub_id; 任一步失败回滚 state 到 approved
 
 设计要点:
@@ -17,7 +17,10 @@
 """
 from __future__ import annotations
 
+import json
 import logging
+import mimetypes
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -42,10 +45,76 @@ APV_TIMEOUT_HOURS = 24
 # 后续若 settings 加 drafts_dir 字段, 改这里读 settings.
 DRAFTS_DIR = Path("data/drafts")
 
+# APV 邮件图片附件单张大小上限 (bytes). 超过跳过并 warn, 不中断发送.
+_MAX_IMG_BYTES = 5 * 1024 * 1024  # 5 MB
 
-async def _send_smtp(*, subject: str, body: str, to_addr: str) -> None:
+
+def _attach_images(msg: EmailMessage, media_json: str | None) -> None:
+    """从 draft.media (JSON list of local paths) 读图, 以 inline 附件加入 msg.
+
+    策略:
+      - 解析失败 / 列表为空 → 静默跳过
+      - 单张文件不存在 / 读失败 / 超 5 MB → log warning, 跳过该张, 其余继续
+      - Content-Disposition: inline 让 163 / Gmail 等客户端直接展开显示
+      - Content-ID: <img-N> 供 body 里 [cid:img-N] 引用 (plain text 客户端看不到, 附件仍展开)
+    """
+    try:
+        paths = json.loads(media_json or "[]")
+    except Exception as e:
+        log.warning(f"[m3] media JSON 解析失败 ({e!r}), 跳过图片附件")
+        return
+
+    if not isinstance(paths, list) or not paths:
+        return
+
+    attached = 0
+    for i, p_str in enumerate(paths):
+        path = Path(p_str)
+        if not path.is_file():
+            log.warning(f"[m3] media 文件不存在, 跳过: {path}")
+            continue
+        try:
+            size = os.path.getsize(path)
+        except OSError as e:
+            log.warning(f"[m3] media stat 失败, 跳过 {path}: {e!r}")
+            continue
+        if size > _MAX_IMG_BYTES:
+            log.warning(
+                f"[m3] media 文件过大 ({size/1024/1024:.1f} MB > 5 MB), 跳过: {path}"
+            )
+            continue
+        try:
+            img_data = path.read_bytes()
+        except OSError as e:
+            log.warning(f"[m3] media 读取失败, 跳过 {path}: {e!r}")
+            continue
+
+        ctype, _ = mimetypes.guess_type(path.name)
+        if not ctype or not ctype.startswith("image/"):
+            ctype = "image/jpeg"
+        maintype, subtype = ctype.split("/", 1)
+        cid = f"img-{i}"
+
+        # add_related: Content-Disposition inline, 带 Content-ID
+        # 163 / Gmail 客户端会在邮件正文区展开显示, 不需要点"附件"
+        msg.add_related(
+            img_data,
+            maintype=maintype,
+            subtype=subtype,
+            filename=path.name,
+            cid=f"<{cid}>",
+        )
+        attached += 1
+        log.debug(f"[m3] 附图 {path.name} ({size/1024:.0f} KB) cid={cid}")
+
+    if attached:
+        log.info(f"[m3] APV 邮件附图 {attached} 张")
+
+
+async def _send_smtp(*, subject: str, body: str, to_addr: str, media_json: str | None = None) -> None:
     """SMTP 发送. settings 取 host/port/user/pass, STARTTLS (Gmail 587).
 
+    media_json: draft.media 字段原始 JSON 字符串 (可选). 有图则以 inline 附件加入.
     失败抛 aiosmtplib.SMTPException, 由 caller 决定回滚 / 重试.
     """
     s = get_settings()
@@ -54,6 +123,12 @@ async def _send_smtp(*, subject: str, body: str, to_addr: str) -> None:
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg.set_content(body, charset="utf-8")
+
+    # 附图 (容错: 失败只 log, 不阻断邮件发送)
+    try:
+        _attach_images(msg, media_json)
+    except Exception as e:
+        log.warning(f"[m3] _attach_images 异常 (邮件仍发出): {e!r}")
 
     from ..shared.smtp import smtp_send
     await smtp_send(msg)
@@ -141,6 +216,7 @@ async def send_approval(draft_id: str, db: Database) -> str | None:
     title = draft.get("title") or "(无标题)"
     summary = draft.get("summary") or ""
     body_md = draft.get("body_md") or ""
+    media_json = draft.get("media")  # JSON list of local image paths (may be None / '[]')
     draft_path = DRAFTS_DIR / f"{draft_id}.md"
 
     subject = build_apv_subject(pub_id, title)
@@ -159,7 +235,7 @@ async def send_approval(draft_id: str, db: Database) -> str | None:
         f"title={title!r}"
     )
     try:
-        await _send_smtp(subject=subject, body=body, to_addr=s.notify_to)
+        await _send_smtp(subject=subject, body=body, to_addr=s.notify_to, media_json=media_json)
     except Exception as e:
         log.error(f"[m3] SMTP 发送失败 pub_id={pub_id}: {e!r}")
         await _rollback_state(db, draft_id, pub_id, f"smtp fail: {e}")
