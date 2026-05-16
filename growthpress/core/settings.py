@@ -34,7 +34,10 @@ class Settings(BaseSettings):
     # ===== LLM (m0) — anthropic SDK 走任一 Anthropic-兼容端点 =====
     llm_api_key: SecretStr = SecretStr("")
     llm_base_url: str = "https://api.deepseek.com/anthropic"
-    llm_model: str = "deepseek-v4-pro[1m]"   # DeepSeek 模型名; 切真 Anthropic 改 claude-sonnet-4-5
+    llm_model: str = "deepseek-v4-pro[1m]"   # m1 默认 (单模型). 切真 Anthropic 改 claude-sonnet-4-5
+    # m2+ 经 llm_router, 按 task → flash / pro 选模型
+    llm_model_flash: str = "deepseek-v4-flash[1m]"   # 短/规则任务 (合规检测/分类/平台适配)
+    llm_model_pro:   str = "deepseek-v4-pro[1m]"     # 创作/深推 (写作/质量审/改稿)
 
     # ===== SMTP (m3/m4/m5 发邮件) =====
     smtp_host: str = "smtp.gmail.com"

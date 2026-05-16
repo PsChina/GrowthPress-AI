@@ -75,6 +75,25 @@ CREATE TABLE IF NOT EXISTS retractions (
     error          TEXT
 );
 
+-- LLM 调用统计 (经济性追踪, 日报用)
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    draft_id      TEXT,
+    task          TEXT NOT NULL,        -- scout_writing / review_compliance / ...
+    model         TEXT NOT NULL,        -- flash / pro / claude (逻辑名, 非具体模型 ID)
+    model_id      TEXT NOT NULL,        -- 实际模型 ID (deepseek-v4-flash[1m] 等)
+    input_tokens  INT,
+    output_tokens INT,
+    cost_usd      REAL,                 -- 按价目表估算, NULL 表示未估
+    duration_ms   INT,
+    success       BOOLEAN NOT NULL,
+    upgraded_from TEXT,                 -- 'flash' 若这次是升级后调用
+    error         TEXT,                 -- success=false 时的错误概要
+    at            TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_draft ON llm_calls(draft_id);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_at    ON llm_calls(at);
+
 -- 行程守护第 4 层: 每次 state 变迁记一条, pending_long / debug 用
 CREATE TABLE IF NOT EXISTS state_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
