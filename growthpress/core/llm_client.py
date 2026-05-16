@@ -1,35 +1,43 @@
-"""m0 core: 统一 LLM client (OpenAI 协议兼容).
+"""m0 core: 统一 LLM client (走 Anthropic SDK + 协议).
 
-DeepSeek (默认) 和 Anthropic 官方都提供 OpenAI 兼容端点 → 一个 AsyncOpenAI client
-配不同 base_url 即可切. 调用方代码不变.
+⭐ 关键架构: DeepSeek 实现了 Anthropic 兼容端点 → 用 anthropic SDK 走 DeepSeek
+后端, web_search server tool 由 DeepSeek 实现 (免费, 跟 DeepSeek 套餐计费).
+
+为什么不用 openai SDK + OpenAI 协议:
+  - Anthropic 的 web_search server tool 是 Anthropic spec 的一部分
+  - DeepSeek 兼容 Anthropic spec → 兼容 web_search
+  - openai SDK + DeepSeek 走 OpenAI 协议, 没有 web_search server tool (要自己接 Tavily 等)
+  - 所以即使后端是 DeepSeek, 也要用 anthropic SDK + Anthropic 协议
 
 切换:
-  .env 改 LLM_BASE_URL=https://api.deepseek.com (默认) → DeepSeek
-  .env 改 LLM_BASE_URL=https://api.anthropic.com/v1 → Anthropic OpenAI 兼容
-  对应换 LLM_API_KEY 和 LLM_MODEL
-
-⚠ Anthropic OpenAI 兼容端点功能有限 (web_search server tool 等高级 feature 不可用).
-全栈 DeepSeek 是当前决策 ([[project-growthpress-overview]] L135), Anthropic 仅 fallback.
+  .env LLM_BASE_URL=https://api.deepseek.com/anthropic  → DeepSeek 接管 (默认, 便宜+免费 web_search)
+  .env LLM_BASE_URL=https://api.anthropic.com          → 真 Anthropic (按 token 计费, $10/1000 web_search)
 
 用法:
-  from growthpress.core import get_llm_client
+  from growthpress.core import get_llm_client, get_settings
   client = get_llm_client()
-  resp = await client.chat.completions.create(model=settings.llm_model, messages=[...])
+  s = get_settings()
+  resp = await client.messages.create(
+      model=s.llm_model,
+      tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
+      max_tokens=4096,
+      messages=[{"role": "user", "content": "..."}]
+  )
 """
 from __future__ import annotations
 
 from functools import lru_cache
 
-from openai import AsyncOpenAI
+from anthropic import AsyncAnthropic
 
 from .settings import get_settings
 
 
 @lru_cache
-def get_llm_client() -> AsyncOpenAI:
-    """单例 AsyncOpenAI client. 跨模块共享, 内部连接池复用."""
+def get_llm_client() -> AsyncAnthropic:
+    """单例 AsyncAnthropic client. 跨模块共享, 内部连接池复用."""
     s = get_settings()
-    return AsyncOpenAI(
+    return AsyncAnthropic(
         api_key=s.llm_api_key.get_secret_value() or "placeholder",
         base_url=s.llm_base_url,
     )
