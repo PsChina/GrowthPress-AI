@@ -1,5 +1,5 @@
 [project]
-name = "growthpress-ai"
+name = "GrowthPress-AI"
 version = "0.1.0"
 description = "GrowthPress AI — 内容自动化数字员工: Scout+Writer → Reviewer → Approver → Publisher → Mailbox"
 requires-python = ">=3.11"
