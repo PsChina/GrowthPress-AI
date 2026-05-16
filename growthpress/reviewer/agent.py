@@ -53,8 +53,19 @@ def _parse_json(text: str) -> dict:
             raw = raw[i : j + 1]
     try:
         return json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"JSON parse fail: {e}\n截取:\n{raw[:300]}")
+    except json.JSONDecodeError as strict_err:
+        # LLM 偶尔 issues/suggested_edits 长 string 没 escape 双引号 / 反斜杠,
+        # json5 容错处理 (multiline string / unescaped quotes / 单引号 都 OK)
+        try:
+            import json5
+            return json5.loads(raw)
+        except Exception as lenient_err:
+            raise ValueError(
+                f"JSON parse fail (json + json5 都救不了):\n"
+                f"  strict: {strict_err}\n"
+                f"  json5 : {lenient_err}\n"
+                f"截取:\n{raw[:300]}"
+            )
 
 
 _BODY_EXCERPT_LIMIT = 2000   # flash 模型对长输入不稳, m2 看摘要 + 前 2000 字够判
@@ -120,7 +131,7 @@ async def check_quality(
             Task.REVIEW_QUALITY,
             system=_PROMPT_QUALITY,
             messages=[{"role": "user", "content": _format_draft(draft)}],
-            max_tokens=1024,
+            max_tokens=2048,    # issues + suggested_edits 各 5+ 条长 string 时 1024 易截
             db=db,
             draft_id=draft_id,
         )

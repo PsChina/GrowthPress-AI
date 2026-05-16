@@ -20,6 +20,7 @@ dependencies = [
     "aioimaplib>=1.1",
     # 调度 (orchestrator)
     "apscheduler>=3.10",
+    "json5>=0.14.0",
 ]
 
 # 渠道插件: 各平台实现 growthpress.publisher.Publisher 协议, 通过 entry_point 注册
