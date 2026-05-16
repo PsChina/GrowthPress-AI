@@ -16,15 +16,21 @@ from ..db import Database
 
 log = logging.getLogger("growthpress.watchdog")
 
-# state → 超时阈值 + 动作 (按 architecture memory 表)
-# pending_human 由 pending_watch_task 处理 (24h reminder), 不进这里
-# pending_long / archived / human_queue / published / retracted → 不算卡死
+# state → 超时阈值 + 动作.
+# v0.2 新架构: 大脑是外部 claude CLI, daemon 不主动写文/改稿. 卡死统一 escalate
+# 到 human_queue, 不 reset 重投 (没人接).
+# pending_human 由 pending_watch_task 单独处理 (24h reminder + pending_long)
 THRESHOLDS: dict[str, dict] = {
-    "new":        {"timeout_min": 5,  "action": "reset", "to": "new"},   # m1 没拉, 重投
-    "reviewing":  {"timeout_min": 10, "action": "reset", "to": "new"},   # m2 卡, 退回 new
-    "revising":   {"timeout_min": 15, "action": "reset", "to": "new"},   # m1 改稿卡, 退回 new
-    "approved":   {"timeout_min": 30, "action": "alert"},                # m3 没拉, 仅 log (人工查 SMTP)
-    "publishing": {"timeout_min": 30, "action": "alert"},                # m4 卡, 仅 log (单平台 wait_for 兜底)
+    # new / reviewing 新架构下 Claude 直接落 approved, 不应再出现. 历史数据 / 异常路径
+    # 卡这两个 state → alert 仅 log, 等人工查 (强转 human_queue 可能误删数据).
+    "new":        {"timeout_min": 60, "action": "alert"},
+    "reviewing":  {"timeout_min": 60, "action": "alert"},
+    # revising_dispatcher 60s 扫. 60min 还卡说明 claude subprocess 起不来 / 持续失败
+    "revising":   {"timeout_min": 60, "action": "to_human_queue"},
+    # m3 send-apv 应该即时. 30min 没动说明 SMTP 故障 / approver 失败 → alert 查日志
+    "approved":   {"timeout_min": 30, "action": "alert"},
+    # m4_pump 60s 扫. 30min 没出说明 publisher 卡 (xhs session 失效 / playwright 挂)
+    "publishing": {"timeout_min": 30, "action": "to_human_queue"},
 }
 
 WATCHDOG_INTERVAL_SEC = 300       # 5 min
@@ -93,6 +99,27 @@ async def _handle_stuck(draft: dict, cfg: dict, db: Database) -> None:
         await _reset(draft_id, state, cfg["to"], cfg["timeout_min"], retry_count, db)
     elif action == "alert":
         await _alert(draft_id, state, cfg["timeout_min"], retry_count, db)
+    elif action == "to_human_queue":
+        await _to_human_queue(draft_id, state, cfg["timeout_min"], retry_count, db)
+    else:
+        log.error(f"[watchdog] 未知 action {action!r} for state {state!r}")
+
+
+async def _to_human_queue(
+    draft_id: str, state: str, timeout_min: int, retry_count: int, db: Database,
+) -> None:
+    """强转 human_queue. 用在 revising / publishing 这类卡死无法自愈的 state."""
+    ok = await db.transition(
+        draft_id, state, "human_queue", "watchdog",
+        reason=f"escalate: 卡 {state} 超 {timeout_min}min (干预 {retry_count + 1})",
+    )
+    if ok:
+        log.warning(
+            f"[watchdog] {draft_id} {state} → human_queue "
+            f"(timeout escalate, 干预 {retry_count + 1})"
+        )
+    else:
+        log.info(f"[watchdog] {draft_id} CAS 失败 (state 已被改), 跳过")
 
 
 async def _reset(

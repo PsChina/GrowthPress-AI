@@ -28,6 +28,7 @@ from .daily_digest import daily_digest_task
 from .db import Database
 from .mailbox import imap_poller_run
 from .publisher.m4_pump import m4_pump_runs
+from .runners.revising_dispatcher import revising_dispatcher_run
 from .watchdog import watchdog_task
 
 log = logging.getLogger("growthpress")
@@ -103,6 +104,8 @@ async def main_async() -> None:
                 tg.create_task(pending_watch(db), name="pending_watch")
                 tg.create_task(watchdog_task(db), name="watchdog")
                 tg.create_task(daily_digest_task(db), name="daily_digest")
+                # 新: 派工给 claude CLI 改稿 (用户 APV 回 "改 X" 后)
+                tg.create_task(revising_dispatcher_run(db), name="revising_dispatcher")
                 tg.create_task(_wait_stop(stop, tg), name="stop_watcher")
         except* asyncio.CancelledError:
             pass  # TaskGroup 收到 stop 信号正常退出
