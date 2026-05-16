@@ -128,15 +128,16 @@ python -m growthpress draft new \
 - `--state approved` 跳过审批环节 (Claude 自己已经审过)
 - 输出 `draft_id=<8-hex>`, 记住给下一步用
 
-### Step 7: dry_run 真发 (验证 publisher 拼通 + 看预览)
+### Step 7: dry_run 验证 publisher 拼通 + 出预览截图
 
 ```bash
 python -m growthpress draft publish-now <draft_id> --platforms xiaohongshu
-# (不加 --real, 默认 dry_run)
+# 不加 --real, dry_run 模式: publisher 跑一遍只出截图, 不动 state, 不污染 publications 表
 ```
 
 - 大约 25-30 秒 (Playwright 起浏览器 + 上传图 + 截图)
 - 输出 `screenshot=<path>`, 用 Read 读取截图
+- draft.state 保持 `approved` 不变 (Step 6 落库时的状态)
 
 ### Step 8: Read 预览截图 + 检查
 
@@ -146,9 +147,35 @@ python -m growthpress draft publish-now <draft_id> --platforms xiaohongshu
 - ✓ 图序 (封面应该是最主题的那张)
 - ✓ "发布"按钮红圈定位正确 (publisher 红圈应该叠在"发布"按钮上, 不是别的)
 
-发现问题 → 回 Step 5-6 改, 再 dry_run.
+发现问题 → 回 Step 5-6 改, 再 dry_run. 没问题 → 进 Step 9.
 
-### Step 9: AskUserQuestion 最终确认
+### Step 9: 发 APV 审批邮件 (离线确认, 推荐)
+
+**默认走邮件确认**, 不用 AskUserQuestion 强求用户在终端在场.
+
+```bash
+python -m growthpress draft send-apv <draft_id>
+```
+
+- 调用 `growthpress.approver.send_approval` 走 SMTP 发 [APV-xxx] 邮件给 `NOTIFY_TO`
+- 邮件含: 标题 / 摘要 / 正文预览 / 计划平台 / 失效时间 (24h) / 回信操作说明
+- draft.state: `approved` → `pending_human` (CAS 锁住, daemon 后续按回信解锁)
+
+**Claude 工作流到此结束**, 退出. 后续闭环由 daemon 自动处理:
+
+| 用户回信 | mailbox 解析 | 后续 |
+|---|---|---|
+| `ok` (或 `ok xiaohongshu juejin`) | Approve | drafts.state → publishing → m4_pump 60s 内拉起真发 → PUB 邮件通知结果 |
+| `改 <意见>` | Reject | drafts.state → revising, 用户下次主动找 Claude 改 |
+| `drop` | Drop | drafts.state → archived |
+| 24h 无回 | (pending_watch) | 提醒 / 转 pending_long |
+
+**前置**: daemon 必须起着 (`uv run growthpress` 一个终端, 或 launchd 装好)
+否则 APV 能发但回信没人接, draft 卡 pending_human.
+
+### Step 9 备选: AskUserQuestion (终端在线场景)
+
+用户明确说"我在线确认" / "不发邮件" / 当前在 Claude 终端不想等邮件:
 
 ```
 AskUserQuestion:
@@ -160,18 +187,21 @@ AskUserQuestion:
     - "取消"
 ```
 
-用户答"取消" → 停在 dry_run, 不发. draft 留在 db 状态 publishing (可手动 update 回 draft).
+答"可以真发" → 直接 Step 10. 不走 send-apv (跳过 daemon, 同步真发).
+答"取消" → 停, draft 留 state=approved (后续可重发).
 
-### Step 10: 真发
+### Step 10: 真发 (只在备选 Step 9 选了"在线 + 真发"时跑)
 
 ```bash
 python -m growthpress draft publish-now <draft_id> --platforms xiaohongshu --real
 ```
 
-- 加 `--real` 才是真发
+- 加 `--real` 才是真发, state → publishing → published / human_queue
 - 预期 30s 完成, success=True / url 包含 `published=true`
 - 输出 `after` 截图 (Read 一下看是否回到空白上传页 — 这是发布成功标志)
 - 让用户去自己平台账号最终确认笔记真的挂上去了
+
+**正常走 Step 9 邮件路径时, 不跑这步** — 真发由 daemon m4_pump 在用户回 "ok" 后触发, 见 Step 9 表.
 
 ## CLI 速查
 

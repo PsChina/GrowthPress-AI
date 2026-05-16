@@ -187,13 +187,15 @@ async def cmd_draft_show(args: argparse.Namespace) -> int:
 
 
 async def cmd_draft_publish_now(args: argparse.Namespace) -> int:
-    """同步直接调 publisher 真发, 不走 daemon m4_pump 轮询.
+    """同步直接调 publisher 真发 (Claude 主动触发用这个).
 
     流程:
       1. 拿 draft (含 media 本地路径)
       2. discover_platforms() 找 target publisher
-      3. 直接 await publisher.publish(content, dry_run=...)
-      4. 落 publications 表 + state 变迁 (publishing → published / human_queue)
+      3. await publisher.publish(content, dry_run=...)
+      4. **dry_run 模式**: 不动 state (只验证 + 出截图), 让后续 send-apv 仍能用
+         **--real 模式**: 改 state → publishing → published / human_queue
+      5. 落 publications 表 (--real 模式才落, dry_run 不污染表)
     """
     async with Database.open(DB_PATH) as db:
         writer = asyncio.create_task(db.writer_loop())
@@ -223,13 +225,6 @@ async def cmd_draft_publish_now(args: argparse.Namespace) -> int:
                       f"available={list(all_pubs.keys())})", file=sys.stderr)
                 return 3
 
-            # state 变迁 (允许从 draft / approved / publishing 任一进入 publishing)
-            if d["state"] != "publishing":
-                await db.transition(
-                    args.draft_id, d["state"], "publishing", "claude-cli",
-                    reason=f"publish-now to {target_names}",
-                )
-
             content: Content = {
                 "type": ContentType.IMAGE_NOTE,
                 "title": d["title"] or "",
@@ -238,6 +233,14 @@ async def cmd_draft_publish_now(args: argparse.Namespace) -> int:
                 "tags": [],
                 "meta": {},
             }
+
+            # --real 模式才动 state (publishing → published / human_queue).
+            # dry_run 模式只跑 publisher 出截图, 不污染 state / publications 表.
+            if args.real and d["state"] != "publishing":
+                await db.transition(
+                    args.draft_id, d["state"], "publishing", "claude-cli",
+                    reason=f"publish-now to {target_names}",
+                )
 
             results = []
             for pub in publishers:
@@ -254,27 +257,31 @@ async def cmd_draft_publish_now(args: argparse.Namespace) -> int:
                     }
                 results.append(r)
 
-                pub_id = _short_id()
-                await db.write(
-                    "INSERT INTO publications "
-                    "(id, draft_id, platform, post_id, url, state, "
-                    "published_at, retract_window_until) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        pub_id, args.draft_id, pub.name, None,
-                        r.get("url"),
-                        "published" if r.get("success") else "failed",
-                        _now_iso() if r.get("success") else None,
-                        None,
-                    ),
-                )
+                if args.real:
+                    pub_id = _short_id()
+                    await db.write(
+                        "INSERT INTO publications "
+                        "(id, draft_id, platform, post_id, url, state, "
+                        "published_at, retract_window_until) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            pub_id, args.draft_id, pub.name, None,
+                            r.get("url"),
+                            "published" if r.get("success") else "failed",
+                            _now_iso() if r.get("success") else None,
+                            None,
+                        ),
+                    )
 
             ok = sum(1 for r in results if r.get("success"))
-            target_state = "published" if ok > 0 else "human_queue"
-            await db.transition(
-                args.draft_id, "publishing", target_state, "claude-cli",
-                reason=f"{ok}/{len(results)} 平台成功",
-            )
+            if args.real:
+                target_state = "published" if ok > 0 else "human_queue"
+                await db.transition(
+                    args.draft_id, "publishing", target_state, "claude-cli",
+                    reason=f"{ok}/{len(results)} 平台成功",
+                )
+            else:
+                target_state = d["state"]   # dry_run: state 不变
         finally:
             writer.cancel()
             try:
@@ -363,6 +370,49 @@ async def cmd_draft_publish(args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_draft_send_apv(args: argparse.Namespace) -> int:
+    """发 APV 审批邮件给 NOTIFY_TO. 用户离线回信由 daemon m5 mailbox 解析.
+
+    前置: draft.state='approved'. send_approval 内部 CAS 锁 approved → pending_human.
+    后续闭环 (daemon 长跑):
+      用户回 "ok"      → mailbox 改 approvals.state=approved + drafts.state=publishing
+                       → m4_pump 60s 内扫到 → 真发
+      用户回 "改 xxx"  → mailbox 改 approvals.state=rejected + drafts.state=revising
+                       → 等下次 Claude 主动改稿
+      用户回 "drop"    → mailbox 改 drafts.state=archived
+      24h 无回信       → daemon pending_watch 提醒 / 转 pending_long
+
+    Note: 要让回信触发后续动作, 必须 launchd / 终端起着 `uv run growthpress` daemon.
+    daemon 没起时 APV 邮件能发出, 但用户回信没人接 → draft 卡 pending_human.
+    """
+    from .approver import send_approval
+    async with Database.open(DB_PATH) as db:
+        writer = asyncio.create_task(db.writer_loop())
+        try:
+            pub_id = await send_approval(args.draft_id, db)
+        finally:
+            writer.cancel()
+            try:
+                await writer
+            except asyncio.CancelledError:
+                pass
+
+    if pub_id is None:
+        print(f"✗ send_approval 返 None (draft 不在 approved / SMTP 未配 / 发送失败)",
+              file=sys.stderr)
+        print(f"  排查: python -m growthpress draft show {args.draft_id}", file=sys.stderr)
+        return 6
+
+    _print({
+        "ok": True,
+        "draft_id": args.draft_id,
+        "pub_id": pub_id,
+        "state": "pending_human",
+        "note": "APV 邮件已发, 等用户回信. daemon 必须起着才能处理回信.",
+    }, args.json)
+    return 0
+
+
 def cmd_platforms(args: argparse.Namespace) -> int:
     pubs = discover_platforms()
     if args.json:
@@ -419,7 +469,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_now.add_argument("draft_id")
     p_now.add_argument("--platforms", nargs="+", default=[])
     p_now.add_argument("--real", action="store_true",
-                       help="默认 dry_run, 加 --real 才真发到平台")
+                       help="默认 dry_run (不动 state), 加 --real 才真发到平台")
+
+    p_apv = psub.add_parser("send-apv", help="发 APV 审批邮件 (前置: state=approved)")
+    p_apv.add_argument("draft_id")
 
     sub.add_parser("platforms", help="列已装的 publisher")
 
@@ -434,6 +487,7 @@ def _route(args: argparse.Namespace):
             "show": cmd_draft_show,
             "publish": cmd_draft_publish,
             "publish-now": cmd_draft_publish_now,
+            "send-apv": cmd_draft_send_apv,
         }[args.sub]
     if args.cmd == "platforms":
         return cmd_platforms
