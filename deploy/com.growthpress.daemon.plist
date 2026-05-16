@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd plist for GrowthPress AI daemon.
+
+  改两处路径 → 你的本地绝对路径, 然后:
+    cp deploy/com.growthpress.daemon.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.growthpress.daemon.plist
+
+  日志:
+    tail -f /tmp/growthpress.out.log
+    tail -f /tmp/growthpress.err.log
+
+  关闭:
+    launchctl unload ~/Library/LaunchAgents/com.growthpress.daemon.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.growthpress.daemon</string>
+
+    <!-- ⚠ 改成你的 GrowthPress-AI 绝对路径下的 .venv/bin/growthpress -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/Desktop/code/GrowthPress-AI/.venv/bin/growthpress</string>
+        <string>--log-level</string>
+        <string>INFO</string>
+    </array>
+
+    <!-- ⚠ 改成你的 GrowthPress-AI 绝对路径 -->
+    <key>WorkingDirectory</key>
+    <string>/Users/YOU/Desktop/code/GrowthPress-AI</string>
+
+    <!-- 行程守护第 1 层: crash 自动拉起 -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- 启动时不立刻跑 (load 后手动 launchctl start 触发) -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- crash 后等 30s 再拉, 防止疯狂重启 -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/growthpress.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/growthpress.err.log</string>
+
+    <!-- 继承 PATH (uv 在 ~/.local/bin), 个别机器需要显式 set -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+
+    <!-- 进程优先级: 低 (内容机器人不抢 CPU) -->
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

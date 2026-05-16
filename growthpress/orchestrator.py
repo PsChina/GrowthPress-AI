@@ -22,8 +22,10 @@ from pathlib import Path
 
 from . import __version__, scout_writer
 from .approver import send_approval
+from .daily_digest import daily_digest_task
 from .db import Database
 from .mailbox import imap_poller_run
+from .publisher.m4_pump import m4_pump_runs
 from .scout_writer.topics import load_topics_config, pick_next_topic
 from .watchdog import watchdog_task
 
@@ -137,9 +139,11 @@ async def main_async() -> None:
                 tg.create_task(db.writer_loop(), name="db_writer")
                 tg.create_task(schedule_runs(db), name="scheduler")
                 tg.create_task(m3_pump_runs(db), name="m3_pump")
+                tg.create_task(m4_pump_runs(db, dry_run=True), name="m4_pump")
                 tg.create_task(imap_poller_run(db), name="imap_poller")
                 tg.create_task(pending_watch(db), name="pending_watch")
                 tg.create_task(watchdog_task(db), name="watchdog")
+                tg.create_task(daily_digest_task(db), name="daily_digest")
                 tg.create_task(_wait_stop(stop, tg), name="stop_watcher")
         except* asyncio.CancelledError:
             pass  # TaskGroup 收到 stop 信号正常退出
