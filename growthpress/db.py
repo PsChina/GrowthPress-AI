@@ -1,7 +1,7 @@
 """SQLite + WAL + 单 writer pattern.
 
 SQLite 本身写锁 → 开 WAL 后并发读 OK, 写仍串行 → 用 queue + 单 writer task 保护.
-所有写必须经 db.write(), 直接 conn.execute(INSERT/UPDATE) 是 bug.
+所有写必须经 db.write() / db.transition(), 直接 conn.execute(INSERT/UPDATE) 是 bug.
 
 Schema 见 [[project-content-bot-skeleton]] L64-L132.
 """
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -73,6 +74,18 @@ CREATE TABLE IF NOT EXISTS retractions (
     state          TEXT NOT NULL,         -- requested | done | failed
     error          TEXT
 );
+
+-- 行程守护第 4 层: 每次 state 变迁记一条, pending_long / debug 用
+CREATE TABLE IF NOT EXISTS state_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    draft_id   TEXT NOT NULL,
+    from_state TEXT,                      -- NULL 表示初始 insert
+    to_state   TEXT NOT NULL,
+    by_agent   TEXT NOT NULL,             -- m1/m2/m3/m4/m5/scheduler/watchdog/human
+    at         TIMESTAMP NOT NULL,
+    reason     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_state_log_draft ON state_log(draft_id, at);
 """
 
 PRAGMAS = [
@@ -110,23 +123,84 @@ class Database:
             await conn.close()
 
     async def writer_loop(self) -> None:
-        """单 writer 串行落库. 由 orchestrator 的 TaskGroup create_task 启动."""
+        """单 writer 串行落库. 由 orchestrator 的 TaskGroup create_task 启动.
+
+        future 填回 dict {lastrowid, rowcount}, 高层 helper 各取所需:
+          - write()      → lastrowid (兼容旧调用)
+          - transition() → rowcount (CAS UPDATE 判断锁是否成功)
+        """
         while True:
             sql, params, fut = await self.write_q.get()
             try:
                 cur = await self.conn.execute(sql, params)
                 await self.conn.commit()
-                fut.set_result(cur.lastrowid)
+                fut.set_result({"lastrowid": cur.lastrowid, "rowcount": cur.rowcount})
             except Exception as e:
                 fut.set_exception(e)
 
-    async def write(self, sql: str, params: tuple = ()) -> int:
-        """串行写, 返回 lastrowid."""
+    async def _exec(self, sql: str, params: tuple = ()) -> dict:
+        """内部: 进 queue 执行, 返回 {lastrowid, rowcount}."""
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         await self.write_q.put((sql, params, fut))
         return await fut
+
+    async def write(self, sql: str, params: tuple = ()) -> int:
+        """串行写, 返回 lastrowid (INSERT 用)."""
+        result = await self._exec(sql, params)
+        return result["lastrowid"]
 
     async def read(self, sql: str, params: tuple = ()) -> list[aiosqlite.Row]:
         """并发读 (WAL 模式下读不阻塞)."""
         async with self.conn.execute(sql, params) as cur:
             return await cur.fetchall()
+
+    async def transition(
+        self,
+        draft_id: str,
+        from_state: str,
+        to_state: str,
+        by_agent: str,
+        reason: str | None = None,
+    ) -> bool:
+        """state 乐观锁变迁 + 写 state_log. 返回 True 表示成功 (锁住了 from_state).
+
+        原子 CAS: `UPDATE drafts SET state=? WHERE id=? AND state=?`, rowcount=1
+        表示锁到了, rowcount=0 表示 draft 不存在或 state 已被别人改过.
+
+        架构 memory 'architecture.md / 行程守护 / 4 层 state_log' 设计.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        result = await self._exec(
+            "UPDATE drafts SET state=?, updated_at=? WHERE id=? AND state=?",
+            (to_state, now, draft_id, from_state),
+        )
+        if result["rowcount"] != 1:
+            return False
+
+        await self.write(
+            "INSERT INTO state_log "
+            "(draft_id, from_state, to_state, by_agent, at, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (draft_id, from_state, to_state, by_agent, now, reason),
+        )
+        return True
+
+    async def log_initial_state(
+        self,
+        draft_id: str,
+        to_state: str,
+        by_agent: str,
+        reason: str | None = None,
+    ) -> None:
+        """初始 INSERT drafts 后调用, 记 state_log (from_state=NULL).
+
+        不用 transition() 因为没有 from_state 可 CAS, 单独走这个 helper.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        await self.write(
+            "INSERT INTO state_log "
+            "(draft_id, from_state, to_state, by_agent, at, reason) "
+            "VALUES (?, NULL, ?, ?, ?, ?)",
+            (draft_id, to_state, by_agent, now, reason),
+        )

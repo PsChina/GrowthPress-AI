@@ -145,6 +145,11 @@ async def run(
                 now,
             ),
         )
+        # 行程守护: 初始 state_log row (from_state=NULL)
+        await db.log_initial_state(
+            draft_id, to_state="new", by_agent="m1",
+            reason=f"topic: {topic[:80]}",
+        )
         log.info(f"[m1] db inserted: drafts.id={draft_id} state=new")
 
     return draft_id, draft

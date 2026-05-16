@@ -16,3 +16,6 @@ data/drafts/*.md
 /plugins/*
 !/plugins/.gitkeep
 # !/plugins/<public-channel-name>/    ← 未来公开渠道在此 unignore
+
+# 个人调度配置 (含具体主题), 仓内只放 topics.example.yaml 模板
+/config/topics.yaml

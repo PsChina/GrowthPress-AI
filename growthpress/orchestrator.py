@@ -20,8 +20,9 @@ import sys
 from contextlib import AsyncExitStack
 from pathlib import Path
 
-from . import __version__
+from . import __version__, scout_writer
 from .db import Database
+from .scout_writer.topics import load_topics_config, pick_next_topic
 
 log = logging.getLogger("growthpress")
 
@@ -29,10 +30,44 @@ DB_PATH = Path(__file__).resolve().parent.parent / "data" / "runs.db"
 
 
 async def schedule_runs(db: Database) -> None:
-    """W2 接: apscheduler 按 topics.yaml 的 cron 触发 pipeline."""
+    """按 config/topics.yaml 间隔触发 m1 scout_writer.
+
+    默认 schedule.enabled=false (防止 daemon 启动就烧 LLM), task 直接退出.
+    enabled=true 时按 interval_minutes 节奏跑, 每次选最久没跑过的 topic.
+
+    单次 m1 调用失败不挂 task (try/except 包住), 等下个 interval 再试.
+    """
+    try:
+        cfg = load_topics_config()
+    except ValueError as e:
+        log.error(f"[scheduler] config 加载失败: {e}")
+        log.error("[scheduler] task exit, 修复 config 后重启 daemon")
+        return
+    if not cfg.schedule.enabled:
+        log.info(
+            "[scheduler] disabled (config/topics.yaml schedule.enabled=false), task exit"
+        )
+        return
+    if not cfg.topics:
+        log.warning("[scheduler] enabled 但 topics 为空, task exit")
+        return
+
+    log.info(
+        f"[scheduler] enabled, interval={cfg.schedule.interval_minutes}min, "
+        f"{len(cfg.topics)} topics: {cfg.topics[:3]}{'...' if len(cfg.topics) > 3 else ''}"
+    )
     while True:
-        log.debug("[scheduler] tick (W1 stub, 无动作)")
-        await asyncio.sleep(60)
+        try:
+            topic = await pick_next_topic(cfg.topics, db)
+            if topic is None:
+                log.warning("[scheduler] pick_next_topic 返回 None, sleep one interval")
+            else:
+                log.info(f"[scheduler] triggering m1: topic={topic!r}")
+                draft_id, _ = await scout_writer.run(topic, db=db)
+                log.info(f"[scheduler] m1 ok: draft_id={draft_id}")
+        except Exception as e:
+            log.error(f"[scheduler] m1 failed: {e!r}", exc_info=True)
+        await asyncio.sleep(cfg.schedule.interval_minutes * 60)
 
 
 async def imap_poller_run(db: Database) -> None:

@@ -1,0 +1,21 @@
+# GrowthPress AI 调度配置 — 示例.
+# 实际用法: cp config/topics.example.yaml config/topics.yaml, 改成你自己的路线.
+# config/topics.yaml 在 .gitignore 排除, 不会进 git.
+
+schedule:
+  # 调度总开关. 默认 false 保护 — 防止 daemon 启动就开始烧 LLM.
+  # 改 true 后 daemon 按 interval_minutes 节奏跑.
+  enabled: false
+
+  # 触发间隔 (分钟). W1 简化: 用固定间隔, 不用 cron 表达式.
+  # 360 = 每 6 小时一次, 240 = 每 4 小时, 1440 = 每天.
+  interval_minutes: 360
+
+# 主题列表. scheduler 每次触发选"最久没跑过"的一条喂给 m1.
+# W1 简化: 列具体 topic. 未来 (W3+) 通过邮件 [ROUTE-ADD] 动态增删改.
+topics:
+  - "Anthropic Claude Skills 实战用法"
+  - "DeepSeek V4 模型升级动向"
+  - "AI 编程工具横向对比: Cursor / Copilot / Aider"
+  - "Claude Agent SDK 开发入门"
+  - "数字员工架构: 多 agent 协作模式"
