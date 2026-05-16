@@ -74,13 +74,12 @@ class LegacyImagePublisher:
 def _adapt(name: str, loaded: Any) -> Publisher:
     """把 entry_point 加载结果转成 Publisher.
 
-    判断顺序:
-      1. 已是 Publisher (实例, 含 name / supported_types / publish)  → 直接用
-      2. 是 class                                                    → 实例化
-      3. 是 callable function                                        → 包装 LegacyImagePublisher
+    判断顺序 (isclass 必须先 — Protocol runtime_checkable 对 class 也算 instance,
+    会跳过实例化导致 method 调用 missing self):
+      1. 是 class    → 实例化, 检查实例符合 Publisher
+      2. 是 Publisher 实例 (已实例化或单例) → 直接用
+      3. 是 function → 包装 LegacyImagePublisher (兼容老 entry_point)
     """
-    if isinstance(loaded, Publisher):
-        return loaded
     if inspect.isclass(loaded):
         instance = loaded()
         if not isinstance(instance, Publisher):
@@ -89,6 +88,8 @@ def _adapt(name: str, loaded: Any) -> Publisher:
                 f"(缺 name / supported_types / async publish)"
             )
         return instance
+    if isinstance(loaded, Publisher):
+        return loaded
     if callable(loaded):
         log.warning(
             f"[platform] {name!r}: 老 function-style entry_point, "

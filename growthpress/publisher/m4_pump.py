@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from ..db import Database
 from .agent import discover_platforms
 from .base import Content, ContentType, PublishResult
+from .pub_email import send_pub_notification
 
 log = logging.getLogger("growthpress.publisher.m4")
 
@@ -121,12 +122,13 @@ async def _publish_one(draft: dict, db: Database, *, dry_run: bool) -> None:
         datetime.now(timezone.utc) + timedelta(hours=RETRACT_WINDOW_HOURS)
     ).isoformat()
     for r in results:
+        publication_id = uuid.uuid4().hex[:8]
         await db.write(
             "INSERT INTO publications "
             "(id, draft_id, platform, post_id, url, state, published_at, retract_window_until) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                uuid.uuid4().hex[:8],
+                publication_id,
                 draft_id,
                 r.get("platform", "unknown"),
                 None,
@@ -139,6 +141,17 @@ async def _publish_one(draft: dict, db: Database, *, dry_run: bool) -> None:
         if r.get("success"):
             log.info(
                 f"[m4] {draft_id} ✓ {r['platform']} {r.get('url') or '(dry_run)'}"
+            )
+            # 发 PUB 通知邮件 (dry_run / 未配 SMTP 时优雅跳过)
+            await send_pub_notification(
+                publication_id=publication_id,
+                draft_id=draft_id,
+                title=draft.get("title") or "",
+                platform=r.get("platform", "unknown"),
+                url=r.get("url"),
+                published_at=now,
+                retract_until=retract_until,
+                dry_run=dry_run,
             )
         else:
             log.warning(

@@ -22,7 +22,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ..core import get_llm_client, get_settings
+from ..core.llm_router import Task, call
 from ..db import Database
 from .schemas import DraftSchema
 
@@ -94,26 +94,25 @@ async def run(
     Returns:
         (draft_id, parsed_draft)
     """
-    client = get_llm_client()
-    s = get_settings()
-
-    log.info(f"[m1] start: topic={topic!r}, model={s.llm_model}")
-    # 用 streaming 而不是 messages.create: long-running (web_search 多次 + 长生成) 时
-    # SSE 持续推送 chunk 不会触发 DeepSeek 端 idle 连接关闭 (实测 create 在 60-90s 后
-    # 被 peer close, streaming 稳)
-    async with client.messages.stream(
-        model=s.llm_model,
-        max_tokens=6144,
-        tools=[WEB_SEARCH_TOOL],
+    # 走 llm_router 统一调用: 自动按 Task.SCOUT_WRITING 路由 (pro 模型) +
+    # 写 llm_calls 表跟踪. 内部已实现 streaming 避免 long-running peer close.
+    # draft_id=None: m1 还没生成 draft_id, llm_calls.draft_id 写 NULL 等于"调研类调用".
+    log.info(f"[m1] start: topic={topic!r}")
+    result = await call(
+        task=Task.SCOUT_WRITING,
         system=_PROMPT,
         messages=[{"role": "user", "content": f"主题: {topic}"}],
-    ) as stream:
-        async for _ in stream:
-            pass  # 累积过程, 不逐 chunk 处理
-        final = await stream.get_final_message()
-
-    full_text = _extract_full_text(final)
-    log.info(f"[m1] streamed: text length={len(full_text)} chars")
+        tools=[WEB_SEARCH_TOOL],
+        max_tokens=6144,
+        db=db,
+        draft_id=None,
+    )
+    full_text = result.text
+    log.info(
+        f"[m1] streamed: text length={len(full_text)} chars, "
+        f"model={result.model_used} ({result.model_id}), "
+        f"tokens={result.input_tokens}→{result.output_tokens}"
+    )
 
     draft = _parse_draft(full_text)
     log.info(
