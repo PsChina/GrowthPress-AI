@@ -63,7 +63,17 @@ uv pip install git+ssh://git@github.com/<org>/<channel-package>.git
 
 ## 配置
 
-### `.env`
+### 交互向导 (推荐)
+
+```bash
+uv run growthpress-setup
+```
+
+按 `[1/4] LLM → [2/4] SMTP → [3/4] IMAP → [4/4] 通知` 四步问完, 自动写入 `.env` (chmod 600)
++ 顺手 `cp config/topics.example.yaml → config/topics.yaml`. 密码字段用 getpass 不在
+终端回显. 已有 `.env` 时显示旧值作默认 (回车保留).
+
+或手动:
 
 ```bash
 cp .env.example .env
@@ -107,6 +117,12 @@ uv run growthpress --log-level INFO
 ```
 
 启动会跑 8 个 long-running task: `db_writer / scheduler / m3_pump / m4_pump / imap_poller / pending_watch / watchdog / daily_digest`. 未配置的服务 (SMTP/IMAP) 对应 task 优雅 exit, 不挂 daemon.
+
+启动前 `preflight` 模块会扫 `.env`:
+- 缺关键字段 (`LLM_API_KEY`) 时, tty 模式询问"现在跑 growthpress-setup?", 非 tty (launchd) 仅 log warning
+- 缺建议字段 (SMTP/IMAP/NOTIFY_TO) 时只 log 提示, 不阻塞
+
+各 CLI 入口 (`m1` / `m2` / `e2e_test.py`) 也同样 preflight, 缺关键字段直接 exit 1.
 
 ### 部署 (macOS launchd)
 

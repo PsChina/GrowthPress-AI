@@ -35,7 +35,8 @@ dependencies = [
 #   all    = [...]
 
 [project.scripts]
-growthpress = "growthpress.orchestrator:cli_main"
+growthpress       = "growthpress.orchestrator:cli_main"
+growthpress-setup = "growthpress.setup:main"
 
 [build-system]
 requires = ["hatchling"]

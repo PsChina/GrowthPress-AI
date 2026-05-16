@@ -167,6 +167,10 @@ def cli_main() -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    # 启动前 preflight: tty 模式询问跑 setup, 非 tty 仅 log
+    from .preflight import maybe_interactive, warn
+    maybe_interactive(source="daemon")
+    warn(source="daemon")
     try:
         asyncio.run(main_async())
     except KeyboardInterrupt:

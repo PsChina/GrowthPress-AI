@@ -23,6 +23,7 @@ from pathlib import Path
 
 from growthpress.approver import send_approval
 from growthpress.db import Database
+from growthpress.preflight import ensure, maybe_interactive
 from growthpress.publisher.m4_pump import _publish_one
 from growthpress.reviewer import review as m2_review
 from growthpress.scout_writer import run as m1_run
@@ -35,6 +36,9 @@ async def main() -> None:
         print(__doc__)
         sys.exit(1)
     topic = sys.argv[1]
+
+    maybe_interactive(source="e2e")
+    ensure("llm_api_key", source="e2e")
 
     async with Database.open(DB_PATH) as db:
         writer = asyncio.create_task(db.writer_loop())

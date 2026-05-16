@@ -22,6 +22,11 @@ async def _main() -> None:
         format="%(asctime)s [%(name)s] %(message)s",
     )
 
+    # tty 模式缺 LLM_API_KEY 时询问跑 setup wizard
+    from ..preflight import ensure, maybe_interactive
+    maybe_interactive(source="m1")
+    ensure("llm_api_key", source="m1")
+
     draft_id, draft = await run(topic)
     print()
     print(f"=== draft {draft_id} ===")

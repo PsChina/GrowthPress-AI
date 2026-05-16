@@ -28,6 +28,10 @@ async def _main() -> None:
         format="%(asctime)s [%(name)s] %(message)s",
     )
 
+    from ..preflight import ensure, maybe_interactive
+    maybe_interactive(source="m2")
+    ensure("llm_api_key", source="m2")
+
     async with Database.open(DB_PATH) as db:
         writer = asyncio.create_task(db.writer_loop())
         try:
