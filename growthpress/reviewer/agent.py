@@ -57,79 +57,102 @@ def _parse_json(text: str) -> dict:
         raise ValueError(f"JSON parse fail: {e}\n截取:\n{raw[:300]}")
 
 
+_BODY_EXCERPT_LIMIT = 2000   # flash 模型对长输入不稳, m2 看摘要 + 前 2000 字够判
+
+
 def _format_draft(draft: dict[str, Any]) -> str:
-    """把 draft 行格式化成 LLM user_msg."""
+    """把 draft 行格式化成 LLM user_msg. 截断 body 防 flash 模型返回空."""
+    body = draft.get("body_md") or ""
+    body_excerpt = body[:_BODY_EXCERPT_LIMIT]
+    if len(body) > _BODY_EXCERPT_LIMIT:
+        body_excerpt += f"\n\n... (正文共 {len(body)} 字, 此处截断)"
+    sources = (draft.get("sources") or "[]")[:600]
     return (
         f"# 标题\n{draft.get('title', '')}\n\n"
         f"# 摘要\n{draft.get('summary', '')}\n\n"
-        f"# 正文 (markdown)\n{draft.get('body_md', '')}\n\n"
-        f"# Sources (JSON)\n{draft.get('sources', '[]')}"
+        f"# 正文 (前 {_BODY_EXCERPT_LIMIT} 字)\n{body_excerpt}\n\n"
+        f"# Sources\n{sources}"
     )
+
+
+async def _call_with_fallback(task: Task, **kwargs):
+    """LLM 返回空 text 时用 pro 重试一次 (简易升级 hook).
+
+    flash 偶尔对长 prompt 返回 0 字, 升级 pro 更稳. 未来 llm_router 内置升级时
+    本函数可拆掉.
+    """
+    result = await call(task=task, **kwargs)
+    if not result.text.strip():
+        log.warning(f"[m2] {task.value} 返回空 text, 升级 pro 重试")
+        kwargs.pop("_force_model", None)
+        result = await call(task=task, _force_model="pro", **kwargs)
+    return result
 
 
 async def check_compliance(
     draft: dict, *, db: Database | None, draft_id: str
 ) -> ComplianceResult:
-    result = await call(
-        task=Task.REVIEW_COMPLIANCE,
-        system=_PROMPT_COMPLIANCE,
-        messages=[{"role": "user", "content": _format_draft(draft)}],
-        max_tokens=512,
-        db=db,
-        draft_id=draft_id,
-    )
-    data = _parse_json(result.text)
+    """整体 try/except 兜底, LLM/parse 失败回 critical 不挂 TaskGroup."""
     try:
+        result = await _call_with_fallback(
+            Task.REVIEW_COMPLIANCE,
+            system=_PROMPT_COMPLIANCE,
+            messages=[{"role": "user", "content": _format_draft(draft)}],
+            max_tokens=512,
+            db=db,
+            draft_id=draft_id,
+        )
+        data = _parse_json(result.text)
         return ComplianceResult.model_validate(data)
-    except ValidationError as e:
-        log.warning(f"[m2] compliance schema 校验失败, fallback critical: {e}")
+    except Exception as e:
+        log.warning(f"[m2] compliance 失败 ({type(e).__name__}): {e}, fallback critical")
         return ComplianceResult(
             passed=False, severity="critical",
-            issues=[f"AI 输出 schema 异常: {e!s}"],
+            issues=[f"AI 调用/解析异常: {type(e).__name__}: {str(e)[:150]}"],
         )
 
 
 async def check_quality(
     draft: dict, *, db: Database | None, draft_id: str
 ) -> QualityResult:
-    result = await call(
-        task=Task.REVIEW_QUALITY,
-        system=_PROMPT_QUALITY,
-        messages=[{"role": "user", "content": _format_draft(draft)}],
-        max_tokens=1024,
-        db=db,
-        draft_id=draft_id,
-    )
-    data = _parse_json(result.text)
     try:
+        result = await _call_with_fallback(
+            Task.REVIEW_QUALITY,
+            system=_PROMPT_QUALITY,
+            messages=[{"role": "user", "content": _format_draft(draft)}],
+            max_tokens=1024,
+            db=db,
+            draft_id=draft_id,
+        )
+        data = _parse_json(result.text)
         return QualityResult.model_validate(data)
-    except ValidationError as e:
-        log.warning(f"[m2] quality schema 校验失败, fallback fail: {e}")
+    except Exception as e:
+        log.warning(f"[m2] quality 失败 ({type(e).__name__}): {e}, fallback score=0")
         return QualityResult(
             passed=False, score=0,
-            issues=[f"AI 输出 schema 异常: {e!s}"],
+            issues=[f"AI 调用/解析异常: {type(e).__name__}: {str(e)[:150]}"],
         )
 
 
 async def check_platforms(
     draft: dict, *, db: Database | None, draft_id: str
 ) -> PlatformResult:
-    result = await call(
-        task=Task.REVIEW_PLATFORM,
-        system=_PROMPT_PLATFORM,
-        messages=[{"role": "user", "content": _format_draft(draft)}],
-        max_tokens=1024,
-        db=db,
-        draft_id=draft_id,
-    )
-    data = _parse_json(result.text)
     try:
+        result = await _call_with_fallback(
+            Task.REVIEW_PLATFORM,
+            system=_PROMPT_PLATFORM,
+            messages=[{"role": "user", "content": _format_draft(draft)}],
+            max_tokens=2048,   # 4 平台 × 多条 issues, 1024 易被截 (sanity 撞过)
+            db=db,
+            draft_id=draft_id,
+        )
+        data = _parse_json(result.text)
         return PlatformResult.model_validate(data)
-    except ValidationError as e:
-        log.warning(f"[m2] platform schema 校验失败, fallback pass+warn: {e}")
+    except Exception as e:
+        log.warning(f"[m2] platform 失败 ({type(e).__name__}): {e}, fallback pass+warn")
         return PlatformResult(
             passed=True,
-            issues_by_platform={"_schema_error": [str(e)[:200]]},
+            issues_by_platform={"_call_error": [str(e)[:150]]},
         )
 
 
